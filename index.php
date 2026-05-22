@@ -94,27 +94,63 @@ ob_start();
 |--------------------------------------------------------------------------
 | CORS configuration
 |--------------------------------------------------------------------------
-| Credentialed browser requests must receive an explicit origin; never "*".
+| Modes:
+| - open:       temporarily allows any browser origin with credentials.
+|               Never use this in production.
+| - restricted: allows only origins listed in FRONTEND_ORIGIN.
+|               Use this for production.
+| - disabled:   returns no CORS access headers.
+|               Your separated app/api domains will not work in a browser.
 */
+$corsMode = strtolower(trim((string) ($_ENV['CORS_MODE'] ?? 'restricted')));
+
 $allowedOrigins = array_values(array_filter(array_map(
     'trim',
-    explode(',', (string)($_ENV['FRONTEND_ORIGIN'] ?? 'http://localhost:5173'))
+    explode(',', (string) ($_ENV['FRONTEND_ORIGIN'] ?? ''))
 )));
 
-$requestOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$requestOrigin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+$originIsAllowed = false;
 
-if ($requestOrigin !== '' && in_array($requestOrigin, $allowedOrigins, true)) {
+if ($requestOrigin !== '' && strtolower($requestOrigin) !== 'null') {
+    if ($corsMode === 'open') {
+        /*
+         * Temporary debugging only:
+         * With credentialed cookies we cannot send "*", so we reflect
+         * the requesting origin instead.
+         */
+        $originIsAllowed = true;
+    } elseif ($corsMode === 'restricted') {
+        $originIsAllowed = in_array($requestOrigin, $allowedOrigins, true);
+    }
+}
+
+if ($originIsAllowed) {
     header("Access-Control-Allow-Origin: {$requestOrigin}");
     header('Access-Control-Allow-Credentials: true');
     header('Vary: Origin');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-Token, X-Requested-With');
+    header('Access-Control-Max-Age: 86400');
 }
 
-header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-Token, X-Requested-With');
-header('Access-Control-Max-Age: 86400');
 header('Content-Type: application/json; charset=UTF-8');
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
+    /*
+     * If the origin is blocked or CORS is disabled, do not return
+     * a successful cross-origin preflight response.
+     */
+    if ($requestOrigin !== '' && !$originIsAllowed) {
+        http_response_code(403);
+        echo json_encode([
+            'status'  => 'Failed',
+            'message' => 'Cross-origin request is not permitted.',
+        ]);
+        ob_end_flush();
+        exit;
+    }
+
     http_response_code(204);
     ob_end_flush();
     exit;
