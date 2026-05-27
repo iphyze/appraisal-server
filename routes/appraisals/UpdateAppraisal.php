@@ -146,7 +146,7 @@ try {
     echo json_encode([
         'status' => 'Success',
         'message' => 'Appraisal updated successfully',
-        'data' => ['appraisal_id' => $appraisalId, 'email_status' => $emailStatus, 'staff_notified' => $notifyStaff],
+        'data' => ['id' => $appraisalId, 'appraisal_id' => $appraisalId, 'email_status' => $emailStatus, 'staff_notified' => $notifyStaff],
     ]);
 
 } catch (Exception $e) {

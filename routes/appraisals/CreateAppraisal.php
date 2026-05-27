@@ -172,7 +172,7 @@ try {
     echo json_encode([
         'status' => 'Success',
         'message' => 'Appraisal created successfully',
-        'data' => ['appraisal_id' => $appraisalId, 'email_status' => $emailStatus],
+        'data' => ['id' => $appraisalId, 'appraisal_id' => $appraisalId, 'email_status' => $emailStatus],
     ]);
 
 } catch (Exception $e) {

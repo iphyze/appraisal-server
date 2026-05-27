@@ -57,52 +57,134 @@ try {
     }
 
     $scores = apFetchAll($conn, "
-        SELECT section_id, section_code, section_label, section_weight, section_avg, weighted_score
-        FROM appraisal_section_scores
-        WHERE appraisal_id = {$id}
-        ORDER BY section_code ASC
+        SELECT sc.section_id, sc.section_code, sc.section_label, sc.section_weight,
+               sc.section_avg, sc.weighted_score, sc.rating_mode, sc.overall_rating,
+               s.type AS section_type, s.sort_order
+        FROM appraisal_section_scores sc
+        LEFT JOIN appraisal_sections s ON s.id = sc.section_id
+        WHERE sc.appraisal_id = {$id}
+        ORDER BY COALESCE(s.sort_order, 999), sc.section_code ASC
     ");
 
-    if (in_array($loggedInRoleKey, ['staff', 'supervisor'], true)) {
-        foreach ($scores as &$score) {
-            unset($score['weighted_score']);
-            if ($loggedInRoleKey === 'staff') unset($score['section_weight']);
-        }
-        unset($score);
-    }
-
     $general = apFetchAll($conn, "
-        SELECT r.section_id, s.code AS section_code, s.label AS section_label, r.general_question_id AS question_id, r.question_text, r.rating
+        SELECT r.section_id, s.code AS section_code, s.label AS section_label, s.type AS section_type,
+               r.general_question_id AS question_id, r.question_text, r.rating
         FROM appraisal_section_responses r
-        INNER JOIN appraisal_sections s ON s.id = r.section_id
+        LEFT JOIN appraisal_sections s ON s.id = r.section_id
         WHERE r.appraisal_id = {$id}
-        ORDER BY s.sort_order ASC, r.id ASC
+        ORDER BY COALESCE(s.sort_order, 999), r.id ASC
     ");
 
     $kpi = apFetchAll($conn, "
-        SELECT r.section_id, s.code AS section_code, s.label AS section_label, r.kpi_question_id AS question_id, r.question_text, r.rating
+        SELECT r.section_id, s.code AS section_code, s.label AS section_label, s.type AS section_type,
+               r.kpi_question_id AS question_id, r.question_text, r.rating
         FROM appraisal_kpi_responses r
-        INNER JOIN appraisal_sections s ON s.id = r.section_id
+        LEFT JOIN appraisal_sections s ON s.id = r.section_id
         WHERE r.appraisal_id = {$id}
-        ORDER BY s.sort_order ASC, r.id ASC
+        ORDER BY COALESCE(s.sort_order, 999), r.id ASC
     ");
 
     $grouped = [];
+
+    // Always initialise sections from saved section scores. This keeps historical
+    // appraisals visible even when the old system did not store question responses.
+    foreach ($scores as $score) {
+        $sid = (int)$score['section_id'];
+        $grouped[$sid] = [
+            'section_id' => $sid,
+            'section_code' => $score['section_code'],
+            'section_label' => $score['section_label'],
+            'section_type' => $score['section_type'] ?? 'general',
+            'rating_mode' => $score['rating_mode'] ?? 'historical_summary',
+            'overall_rating' => $score['overall_rating'] ?? $score['section_avg'],
+            'section_avg' => $score['section_avg'],
+            'responses' => [],
+            'is_historical_reference' => false,
+        ];
+    }
+
     foreach (array_merge($kpi, $general) as $row) {
         $sid = (int)$row['section_id'];
+
         if (!isset($grouped[$sid])) {
             $grouped[$sid] = [
                 'section_id' => $sid,
                 'section_code' => $row['section_code'],
                 'section_label' => $row['section_label'],
+                'section_type' => $row['section_type'] ?? 'general',
+                'rating_mode' => 'per_question',
+                'overall_rating' => null,
+                'section_avg' => null,
                 'responses' => [],
+                'is_historical_reference' => false,
             ];
         }
+
         $grouped[$sid]['responses'][] = [
             'question_id' => (int)$row['question_id'],
             'question_text' => $row['question_text'],
             'rating' => $row['rating'],
+            'is_reference' => false,
         ];
+    }
+
+    /*
+     * Imported legacy appraisals carry accurate section scores, but the old
+     * source did not retain dependable question-by-question ratings. Where
+     * response snapshots are absent, show the questions configured for that
+     * historical cycle as reference information and keep the saved section
+     * score as the authoritative rating.
+     */
+    foreach ($grouped as $sid => &$sectionGroup) {
+        if (!empty($sectionGroup['responses'])) {
+            continue;
+        }
+
+        $sectionGroup['is_historical_reference'] = true;
+        if ($sectionGroup['rating_mode'] === 'per_question') {
+            $sectionGroup['rating_mode'] = 'historical_summary';
+        }
+
+        if (($sectionGroup['section_type'] ?? '') === 'kpi') {
+            $snapshot = trim((string)($appraisal['kpi_questions_snapshot'] ?? ''));
+
+            if ($snapshot !== '') {
+                $sectionGroup['responses'][] = [
+                    'question_id' => 0,
+                    'question_text' => $snapshot,
+                    'rating' => null,
+                    'is_reference' => true,
+                ];
+            }
+        } else {
+            $referenceQuestions = apFetchAll($conn, "
+                SELECT id, question_text
+                FROM general_questions
+                WHERE section_id = {$sid}
+                  AND company_id = " . (int)$appraisal['company_id'] . "
+                ORDER BY sort_order ASC, id ASC
+            ");
+
+            foreach ($referenceQuestions as $question) {
+                $sectionGroup['responses'][] = [
+                    'question_id' => (int)$question['id'],
+                    'question_text' => $question['question_text'],
+                    'rating' => null,
+                    'is_reference' => true,
+                ];
+            }
+        }
+    }
+    unset($sectionGroup);
+
+    if (in_array($loggedInRoleKey, ['staff', 'supervisor'], true)) {
+        foreach ($scores as &$score) {
+            unset($score['weighted_score']);
+            if ($loggedInRoleKey === 'staff') {
+                unset($score['section_weight']);
+            }
+        }
+        unset($score);
     }
 
     $appraisal['section_scores'] = $scores;

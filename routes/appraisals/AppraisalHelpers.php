@@ -50,13 +50,19 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
     ");
 
     $sectionMap = [];
-    foreach ($sectionRows as $section) $sectionMap[(int)$section['id']] = $section;
+    foreach ($sectionRows as $section) {
+        $sectionMap[(int)$section['id']] = $section;
+    }
 
-    if (empty($sectionMap)) throw new Exception('No active appraisal sections found for this cycle.', 400);
+    if (empty($sectionMap)) {
+        throw new Exception('No active appraisal sections found for this cycle.', 400);
+    }
 
-    $conn->query("DELETE FROM appraisal_section_scores WHERE appraisal_id = {$appraisalId}");
-    $conn->query("DELETE FROM appraisal_section_responses WHERE appraisal_id = {$appraisalId}");
-    $conn->query("DELETE FROM appraisal_kpi_responses WHERE appraisal_id = {$appraisalId}");
+    if (!$conn->query("DELETE FROM appraisal_section_scores WHERE appraisal_id = {$appraisalId}")
+        || !$conn->query("DELETE FROM appraisal_section_responses WHERE appraisal_id = {$appraisalId}")
+        || !$conn->query("DELETE FROM appraisal_kpi_responses WHERE appraisal_id = {$appraisalId}")) {
+        throw new Exception('Unable to reset the appraisal response records: ' . $conn->error, 500);
+    }
 
     $sectionScores = [];
     $summary = 0;
@@ -65,25 +71,55 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
 
     foreach ($sections as $sectionPayload) {
         if (!isset($sectionPayload['section_id'], $sectionPayload['responses']) || !is_array($sectionPayload['responses'])) {
-            throw new Exception("Each section must contain section_id and responses.", 400);
+            throw new Exception('Each section must contain section_id and responses.', 400);
         }
 
         $sectionId = (int)$sectionPayload['section_id'];
-        if (!isset($sectionMap[$sectionId])) throw new Exception("Section ID {$sectionId} is not valid for this cycle.", 400);
+        if (!isset($sectionMap[$sectionId])) {
+            throw new Exception("Section ID {$sectionId} is not valid for this cycle.", 400);
+        }
 
         $section = $sectionMap[$sectionId];
         $responses = $sectionPayload['responses'];
-        if (count($responses) === 0) throw new Exception("Section {$section['code']} must have at least one rating.", 400);
+        if (count($responses) === 0) {
+            throw new Exception("Section {$section['code']} must contain at least one question.", 400);
+        }
+
+        $ratingMode = (($sectionPayload['rating_mode'] ?? 'per_question') === 'overall')
+            ? 'overall'
+            : 'per_question';
+
+        $overallRating = null;
+        if ($ratingMode === 'overall') {
+            $overallRating = (float)($sectionPayload['overall_rating'] ?? 0);
+            if ($overallRating < 1 || $overallRating > 5) {
+                throw new Exception("Overall rating for section {$section['code']} must be between 1.0 and 5.0.", 400);
+            }
+        }
 
         $ratings = [];
+
         foreach ($responses as $response) {
-            if (!isset($response['question_id'], $response['rating'])) {
-                throw new Exception("Each response must contain question_id and rating.", 400);
+            if (!isset($response['question_id'])) {
+                throw new Exception('Each response must contain question_id.', 400);
             }
 
             $questionId = (int)$response['question_id'];
-            $rating = (float)$response['rating'];
-            if ($rating < 1 || $rating > 5) throw new Exception('Rating must be between 1 and 5.', 400);
+            $rating = null;
+
+            if ($ratingMode === 'per_question') {
+                if (!isset($response['rating']) || $response['rating'] === null || $response['rating'] === '') {
+                    throw new Exception("A rating is required for each question in section {$section['code']}.", 400);
+                }
+
+                $rating = (float)$response['rating'];
+                if ($rating < 1 || $rating > 5) {
+                    throw new Exception('Rating must be between 1.0 and 5.0.', 400);
+                }
+                $ratings[] = $rating;
+            }
+
+            $ratingSql = $rating === null ? 'NULL' : (string)(float)$rating;
 
             if ($section['type'] === 'kpi') {
                 $incomingText = trim((string)($response['question_text'] ?? ''));
@@ -102,11 +138,14 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                     ");
                 }
 
-                if ($incomingText === '' && $question) $incomingText = $question['question_text'];
-                if ($incomingText === '') throw new Exception("KPI question text is required for section {$section['code']}.", 400);
+                if ($incomingText === '' && $question) {
+                    $incomingText = $question['question_text'];
+                }
 
-                // Supervisors can customize KPI questions per staff appraisal. To preserve history and FK integrity,
-                // edited/new KPI questions are saved as staff-specific KPI question records, then referenced in the response.
+                if ($incomingText === '') {
+                    throw new Exception("KPI question text is required for section {$section['code']}.", 400);
+                }
+
                 if (!$question || $isCustom || $isEdited || trim((string)$question['question_text']) !== $incomingText) {
                     $questionTextForInsert = apEsc($conn, $incomingText);
                     $sortOrder = isset($response['sort_order']) ? (int)$response['sort_order'] : 0;
@@ -115,17 +154,29 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                     $staffSql = $staffUserId > 0 ? (int)$staffUserId : 'NULL';
                     $createdBySql = $loggedInUserId > 0 ? (int)$loggedInUserId : 'NULL';
 
-                    $conn->query("INSERT INTO kpi_questions (company_id, section_id, department, supervisor_id, staff_user_id, question_text, sort_order, is_active, created_by, updated_by) VALUES ({$companyId}, {$sectionId}, {$departmentSql}, {$supervisorSql}, {$staffSql}, '{$questionTextForInsert}', {$sortOrder}, 1, {$createdBySql}, {$createdBySql})");
+                    $insertQuestion = "INSERT INTO kpi_questions
+                        (company_id, section_id, department, supervisor_id, staff_user_id, question_text, sort_order, is_active, created_by, updated_by)
+                        VALUES ({$companyId}, {$sectionId}, {$departmentSql}, {$supervisorSql}, {$staffSql}, '{$questionTextForInsert}', {$sortOrder}, 1, {$createdBySql}, {$createdBySql})";
+                    if (!$conn->query($insertQuestion)) {
+                        throw new Exception('Unable to save the customised KPI question: ' . $conn->error, 500);
+                    }
                     $questionId = (int)$conn->insert_id;
-                    $question = ['id' => $questionId, 'question_text' => $incomingText];
                 }
 
-                if ($questionId <= 0) throw new Exception("Unable to resolve KPI question for section {$section['code']}.", 400);
+                if ($questionId <= 0) {
+                    throw new Exception("Unable to resolve KPI question for section {$section['code']}.", 400);
+                }
+
                 $questionText = apEsc($conn, $incomingText);
-                $conn->query("INSERT INTO appraisal_kpi_responses (appraisal_id, section_id, kpi_question_id, question_text, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$rating})");
+                if (!$conn->query("INSERT INTO appraisal_kpi_responses (appraisal_id, section_id, kpi_question_id, question_text, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$ratingSql})")) {
+                    throw new Exception('Unable to save KPI appraisal response: ' . $conn->error, 500);
+                }
                 $kpiSnapshot[] = $incomingText;
             } else {
-                if ($questionId <= 0) throw new Exception('Invalid question selected.', 400);
+                if ($questionId <= 0) {
+                    throw new Exception('Invalid question selected.', 400);
+                }
+
                 $question = apFetchOne($conn, "
                     SELECT id, question_text
                     FROM general_questions
@@ -134,18 +185,28 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                       AND section_id = {$sectionId}
                     LIMIT 1
                 ");
-                if (!$question) throw new Exception("General question ID {$questionId} was not found for section {$section['code']}.", 400);
-                $questionText = apEsc($conn, $question['question_text']);
-                $conn->query("INSERT INTO appraisal_section_responses (appraisal_id, section_id, general_question_id, question_text, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$rating})");
-            }
 
-            $ratings[] = $rating;
+                if (!$question) {
+                    throw new Exception("General question ID {$questionId} was not found for section {$section['code']}.", 400);
+                }
+
+                $questionText = apEsc($conn, $question['question_text']);
+                if (!$conn->query("INSERT INTO appraisal_section_responses (appraisal_id, section_id, general_question_id, question_text, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$ratingSql})")) {
+                    throw new Exception('Unable to save general appraisal response: ' . $conn->error, 500);
+                }
+            }
         }
 
-        $avg = count($ratings) ? array_sum($ratings) / count($ratings) : 0;
+        $avg = $ratingMode === 'overall'
+            ? $overallRating
+            : (count($ratings) ? array_sum($ratings) / count($ratings) : 0);
+
         $weighted = $avg * (((float)$section['weight']) / 100);
         $summary += $weighted;
-        if ($section['type'] === 'kpi') $kpiRating = round($avg, 2);
+
+        if ($section['type'] === 'kpi') {
+            $kpiRating = round($avg, 2);
+        }
 
         $scoreRow = [
             'section_id' => $sectionId,
@@ -154,6 +215,8 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
             'section_weight' => (float)$section['weight'],
             'section_avg' => round($avg, 2),
             'weighted_score' => round($weighted, 4),
+            'rating_mode' => $ratingMode,
+            'overall_rating' => $ratingMode === 'overall' ? round($avg, 2) : null,
         ];
         $sectionScores[] = $scoreRow;
 
@@ -162,10 +225,18 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
         $weight = (float)$scoreRow['section_weight'];
         $sectionAvg = (float)$scoreRow['section_avg'];
         $weightedScore = (float)$scoreRow['weighted_score'];
-        $conn->query("INSERT INTO appraisal_section_scores (appraisal_id, section_id, section_code, section_label, section_weight, section_avg, weighted_score) VALUES ({$appraisalId}, {$sectionId}, '{$code}', '{$label}', {$weight}, {$sectionAvg}, {$weightedScore})");
+        $mode = apEsc($conn, $scoreRow['rating_mode']);
+        $overallSql = $scoreRow['overall_rating'] === null ? 'NULL' : (string)(float)$scoreRow['overall_rating'];
+
+        if (!$conn->query("INSERT INTO appraisal_section_scores
+            (appraisal_id, section_id, section_code, section_label, section_weight, section_avg, weighted_score, rating_mode, overall_rating)
+            VALUES ({$appraisalId}, {$sectionId}, '{$code}', '{$label}', {$weight}, {$sectionAvg}, {$weightedScore}, '{$mode}', {$overallSql})")) {
+            throw new Exception('Unable to save section score: ' . $conn->error, 500);
+        }
     }
 
     $summary = round($summary, 2);
+
     return [
         'section_scores' => $sectionScores,
         'appraisal_summary' => $summary,

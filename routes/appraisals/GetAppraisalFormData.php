@@ -145,11 +145,22 @@ try {
 
     $existingGeneralRatings = [];
     $existingKpiRatings = [];
+    $existingSectionRating = [];
+
     if ($existing) {
         $genRatings = fetchAllRaw($conn, "SELECT general_question_id, rating FROM appraisal_section_responses WHERE appraisal_id = {$appraisalId}");
         foreach ($genRatings as $row) $existingGeneralRatings[(int)$row['general_question_id']] = $row['rating'];
+
         $kpiRatings = fetchAllRaw($conn, "SELECT kpi_question_id, rating FROM appraisal_kpi_responses WHERE appraisal_id = {$appraisalId}");
         foreach ($kpiRatings as $row) $existingKpiRatings[(int)$row['kpi_question_id']] = $row['rating'];
+
+        $scoreModes = fetchAllRaw($conn, "SELECT section_id, rating_mode, overall_rating, section_avg FROM appraisal_section_scores WHERE appraisal_id = {$appraisalId}");
+        foreach ($scoreModes as $score) {
+            $existingSectionRating[(int)$score['section_id']] = [
+                'rating_mode' => ($score['rating_mode'] ?? 'per_question') === 'overall' ? 'overall' : 'per_question',
+                'overall_rating' => ($score['rating_mode'] ?? '') === 'overall' ? ($score['overall_rating'] ?? $score['section_avg']) : '',
+            ];
+        }
     }
 
     $sections = fetchAllRaw($conn, "
@@ -244,7 +255,15 @@ try {
             }
         }
 
-        $formSections[] = array_merge($section, ['questions' => $questions]);
+        // New appraisals open in cumulative (overall section) mode by default.
+        // When editing an existing appraisal, retain the mode already saved.
+        $defaultRatingMode = $existing ? 'per_question' : 'overall';
+        $savedMode = $existingSectionRating[$sectionId] ?? ['rating_mode' => $defaultRatingMode, 'overall_rating' => ''];
+        $formSections[] = array_merge($section, [
+            'rating_mode' => $savedMode['rating_mode'],
+            'overall_rating' => $savedMode['overall_rating'],
+            'questions' => $questions,
+        ]);
     }
 
     jsonResponse('Success', 'Appraisal form data fetched successfully.', [
