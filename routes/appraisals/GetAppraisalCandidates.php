@@ -114,6 +114,7 @@ try {
             s.id AS staff_user_id,
             s.first_name, s.last_name, s.fullname, s.email, s.staff_id, s.unique_ref,
             s.department, s.job_title, s.staff_type, s.location, s.date_of_joining,
+            sa.supervisor_id,
             ap.id AS appraisal_id,
             ap.status AS appraisal_status,
             ap.kpi_rating,
@@ -124,7 +125,20 @@ try {
             ap.update_count,
             ap.created_at AS appraised_at,
             ap.updated_at AS appraisal_updated_at,
-            TRIM(CONCAT(COALESCE(sup.first_name, ''), ' ', COALESCE(sup.last_name, ''))) AS supervisor_name
+            TRIM(CONCAT(COALESCE(sup.first_name, ''), ' ', COALESCE(sup.last_name, ''))) AS supervisor_name,
+            CASE
+                WHEN sa.supervisor_id = {$loggedInUserId}
+                 AND '{$loggedInRoleKey}' IN ('admin', 'supervisor')
+                 AND EXISTS (
+                    SELECT 1
+                    FROM supervisor_onboarding so
+                    WHERE so.cycle_id = sa.cycle_id
+                      AND so.supervisor_id = sa.supervisor_id
+                    LIMIT 1
+                 )
+                THEN 1
+                ELSE 0
+            END AS can_manage_appraisal
         {$baseFrom}
         ORDER BY s.first_name ASC, s.last_name ASC, s.id ASC
         LIMIT {$limit} OFFSET {$offset}

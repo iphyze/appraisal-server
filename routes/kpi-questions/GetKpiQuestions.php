@@ -17,6 +17,7 @@ try {
 
     // Filters
     $sectionId     = isset($_GET['section_id'])    ? (int) $_GET['section_id']    : null;
+    $cycleId       = isset($_GET['cycle_id'])      ? (int) $_GET['cycle_id']      : null;
     $department    = isset($_GET['department'])     ? trim($_GET['department'])     : null;
     $supervisorId  = isset($_GET['supervisor_id'])  ? (int) $_GET['supervisor_id'] : null;
     $staffUserId   = isset($_GET['staff_user_id'])  ? (int) $_GET['staff_user_id'] : null;
@@ -60,6 +61,12 @@ try {
     if ($sectionId) {
         $baseQuery .= " AND kq.section_id = ?";
         $params[]   = $sectionId;
+        $types     .= "i";
+    }
+
+    if ($cycleId) {
+        $baseQuery .= " AND s.cycle_id = ?";
+        $params[]   = $cycleId;
         $types     .= "i";
     }
 
@@ -117,6 +124,7 @@ try {
             s.weight AS section_weight,
             ac.id   AS cycle_id,
             ac.year AS cycle_year,
+            ac.title AS cycle_title,
             c.id    AS company_id,
             c.code  AS company_code,
             c.name  AS company_name,
@@ -165,6 +173,7 @@ try {
             "sortOrder"   => $sortOrder,
             "filters"     => [
                 "section_id"    => $sectionId,
+                "cycle_id"      => $cycleId,
                 "department"    => $department,
                 "supervisor_id" => $supervisorId,
                 "staff_user_id" => $staffUserId,

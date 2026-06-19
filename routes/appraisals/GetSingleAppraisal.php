@@ -23,7 +23,28 @@ try {
         SELECT ap.*, ac.year AS cycle_year, ac.title AS cycle_title, ac.start_date AS cycle_start_date, ac.end_date AS cycle_end_date,
                c.name AS company_name, c.code AS company_code,
                TRIM(CONCAT(COALESCE(sup.first_name,''), ' ', COALESCE(sup.last_name,''))) AS supervisor_name,
-               sup.email AS supervisor_email, sup.department AS supervisor_department
+               sup.email AS supervisor_email, sup.department AS supervisor_department,
+               CASE
+                   WHEN ap.supervisor_id = {$loggedInUserId}
+                    AND '{$loggedInRoleKey}' IN ('admin', 'supervisor')
+                    AND EXISTS (
+                        SELECT 1
+                        FROM supervisor_assignments sa
+                        WHERE sa.cycle_id = ap.cycle_id
+                          AND sa.staff_id = ap.staff_user_id
+                          AND sa.supervisor_id = ap.supervisor_id
+                        LIMIT 1
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM supervisor_onboarding so
+                        WHERE so.cycle_id = ap.cycle_id
+                          AND so.supervisor_id = ap.supervisor_id
+                        LIMIT 1
+                    )
+                   THEN 1
+                   ELSE 0
+               END AS can_manage_appraisal
         FROM appraisals ap
         INNER JOIN appraisal_cycles ac ON ac.id = ap.cycle_id
         INNER JOIN companies c ON c.id = ap.company_id
@@ -146,15 +167,40 @@ try {
         }
 
         if (($sectionGroup['section_type'] ?? '') === 'kpi') {
-            $snapshot = trim((string)($appraisal['kpi_questions_snapshot'] ?? ''));
+            $snapshotLines = apHistoricalKpiSnapshotLines(
+                $appraisal['kpi_questions_snapshot'] ?? ''
+            );
 
-            if ($snapshot !== '') {
-                $sectionGroup['responses'][] = [
-                    'question_id' => 0,
-                    'question_text' => $snapshot,
-                    'rating' => null,
-                    'is_reference' => true,
-                ];
+            if (!empty($snapshotLines)) {
+                foreach ($snapshotLines as $index => $questionText) {
+                    $sectionGroup['responses'][] = [
+                        'question_id' => 0,
+                        'question_text' => $questionText,
+                        'rating' => null,
+                        'is_reference' => true,
+                        'reference_source' => 'historical_snapshot',
+                        'sort_order' => $index + 1,
+                    ];
+                }
+            } else {
+                $referenceQuestions = apHistoricalKpiReferenceQuestions(
+                    $conn,
+                    (int) $appraisal['company_id'],
+                    (int) $sid,
+                    (int) $appraisal['staff_user_id'],
+                    (int) $appraisal['supervisor_id'],
+                    (string) ($appraisal['staff_department'] ?? '')
+                );
+
+                foreach ($referenceQuestions as $question) {
+                    $sectionGroup['responses'][] = [
+                        'question_id' => (int) $question['id'],
+                        'question_text' => $question['question_text'],
+                        'rating' => null,
+                        'is_reference' => true,
+                        'reference_source' => 'configured_question_bank',
+                    ];
+                }
             }
         } else {
             $referenceQuestions = apFetchAll($conn, "

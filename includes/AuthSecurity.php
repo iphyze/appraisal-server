@@ -80,6 +80,17 @@ function issueCsrfToken(): string
     return $token;
 }
 
+function currentOrIssueCsrfToken(): string
+{
+    $current = trim((string)($_COOKIE['lambert_csrf'] ?? ''));
+
+    if (preg_match('/^[a-f0-9]{64}$/i', $current)) {
+        return $current;
+    }
+
+    return issueCsrfToken();
+}
+
 function clearAuthCookies(): void
 {
     setcookie('lambert_session', '', securityCookieOptions(time() - 3600, true));

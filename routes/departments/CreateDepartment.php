@@ -24,7 +24,7 @@ try {
         throw new Exception("Field 'name' is required.", 400);
     }
 
-    $name = trim($data['name']);
+    $name = preg_replace('/\s+/u', ' ', trim((string) $data['name']));
     $isActive = isset($data['is_active']) ? (int) $data['is_active'] : 1;
     $companyId = ($loggedInUserRole === 'super_admin' && isset($data['company_id']) && $data['company_id'] !== '')
         ? (int) $data['company_id']
@@ -45,7 +45,7 @@ try {
     }
     $companyStmt->close();
 
-    $dupStmt = $conn->prepare("SELECT id FROM departments WHERE company_id = ? AND name = ? LIMIT 1");
+    $dupStmt = $conn->prepare("SELECT id FROM departments WHERE company_id = ? AND LOWER(name) = LOWER(?) LIMIT 1");
     $dupStmt->bind_param('is', $companyId, $name);
     $dupStmt->execute();
     if ($dupStmt->get_result()->num_rows > 0) {

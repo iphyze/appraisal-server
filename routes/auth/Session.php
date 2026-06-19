@@ -15,10 +15,10 @@ try {
     $user = authenticateUser();
 
     /*
-     * Refresh the JavaScript-readable CSRF token for subsequent
-     * authenticated POST, PUT, PATCH and DELETE requests.
+     * Reuse the current browser CSRF token when it is still valid. Rotating it
+     * on every session probe makes another open tab's in-memory token stale.
      */
-    $csrfToken = issueCsrfToken();
+    $csrfToken = currentOrIssueCsrfToken();
 
     unset($user['token_version']);
 

@@ -87,53 +87,38 @@ try {
         }
     }
 
-    if ($loggedInRoleKey === 'supervisor') {
-        $assignment = fetchOneRaw($conn, "
-            SELECT id FROM supervisor_assignments
-            WHERE cycle_id = {$cycleId}
-              AND supervisor_id = {$loggedInUserId}
-              AND staff_id = {$staffUserId}
-            LIMIT 1
-        ");
-        if (!$assignment) throw new Exception('This staff member is not assigned to you for this appraisal cycle.', 403);
-
-        $onboard = fetchOneRaw($conn, "
-            SELECT id FROM supervisor_onboarding
-            WHERE cycle_id = {$cycleId}
-              AND supervisor_id = {$loggedInUserId}
-            LIMIT 1
-        ");
-        if (!$onboard) throw new Exception('You need to complete supervisor onboarding before appraising staff for this cycle.', 403);
-
-        if ($existing && (int)$existing['supervisor_id'] !== $loggedInUserId) {
-            throw new Exception('Unauthorized: You can only edit appraisals you conducted.', 403);
-        }
-    } elseif ($loggedInRoleKey === 'admin' && $companyId !== $loggedInCompanyId) {
+    if ($loggedInRoleKey === 'admin' && $companyId !== $loggedInCompanyId) {
         throw new Exception('Unauthorized: This appraisal does not belong to your company.', 403);
     }
 
-    $supervisorId = $existing ? (int)$existing['supervisor_id'] : 0;
-    if ($supervisorId <= 0) {
-        if ($loggedInRoleKey === 'supervisor') {
-            $supervisorId = $loggedInUserId;
-        } else {
-            $supRow = fetchOneRaw($conn, "
-                SELECT supervisor_id
-                FROM supervisor_assignments
-                WHERE cycle_id = {$cycleId}
-                  AND staff_id = {$staffUserId}
-                ORDER BY id ASC
-                LIMIT 1
-            " );
-            if (!$supRow) throw new Exception('Assign this employee to an appraiser before starting the appraisal.', 400);
-            $supervisorId = (int) $supRow['supervisor_id'];
-        }
+    if (!in_array($loggedInRoleKey, ['admin', 'supervisor'], true)) {
+        throw new Exception('Super administrators may view appraisals, but only the assigned supervisor can start or edit one.', 403);
     }
 
-    if (!$existing && $loggedInRoleKey !== 'supervisor') {
-        $onboard = fetchOneRaw($conn, "SELECT id FROM supervisor_onboarding WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} LIMIT 1");
-        if (!$onboard) throw new Exception('The assigned appraiser must complete onboarding before this appraisal can begin.', 403);
+    $assignment = fetchOneRaw($conn, "
+        SELECT id, supervisor_id
+        FROM supervisor_assignments
+        WHERE cycle_id = {$cycleId}
+          AND staff_id = {$staffUserId}
+        ORDER BY id ASC
+        LIMIT 1
+    ");
+
+    if (!$assignment) {
+        throw new Exception('Assign this employee to a supervisor before starting the appraisal.', 400);
     }
+
+    $supervisorId = (int) $assignment['supervisor_id'];
+    if ($supervisorId !== $loggedInUserId) {
+        throw new Exception('This employee is not assigned to you for this appraisal cycle.', 403);
+    }
+
+    if ($existing && (int) $existing['supervisor_id'] !== $loggedInUserId) {
+        throw new Exception('Unauthorized: You can only edit appraisals assigned to you.', 403);
+    }
+
+    $onboard = fetchOneRaw($conn, "SELECT id FROM supervisor_onboarding WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} LIMIT 1");
+    if (!$onboard) throw new Exception('Complete supervisor onboarding before starting or editing this appraisal.', 403);
 
     $supervisor = fetchOneRaw($conn, "
         SELECT u.id, u.first_name, u.last_name, u.fullname, u.email, u.department, u.job_title, r.name AS role_name

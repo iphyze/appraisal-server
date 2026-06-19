@@ -246,6 +246,103 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
     ];
 }
 
+
+function apHistoricalKpiSnapshotLines($snapshot): array
+{
+    $snapshot = trim((string) $snapshot);
+
+    if ($snapshot === '') {
+        return [];
+    }
+
+    /*
+     * Some legacy rows contain placeholders such as "\\\\", "????" or only
+     * punctuation. They are not real KPI questions and must not be displayed.
+     */
+    $meaningful = preg_replace('/[^\pL\pN]+/u', '', $snapshot);
+    if ($meaningful === null || strlen($meaningful) < 3) {
+        return [];
+    }
+
+    $rawLines = preg_split('/\r\n|\r|\n/u', $snapshot) ?: [];
+    $lines = [];
+
+    foreach ($rawLines as $line) {
+        $line = trim((string) $line);
+        $lineMeaningful = preg_replace('/[^\pL\pN]+/u', '', $line);
+
+        if ($line === '' || $lineMeaningful === null || strlen($lineMeaningful) < 3) {
+            continue;
+        }
+
+        $lines[$line] = $line;
+    }
+
+    return array_values($lines);
+}
+
+function apHistoricalKpiReferenceQuestions(
+    $conn,
+    int $companyId,
+    int $sectionId,
+    int $staffUserId,
+    int $supervisorId,
+    string $department
+): array {
+    $department = apEsc($conn, $department);
+
+    $rows = apFetchAll($conn, "
+        SELECT DISTINCT
+            q.id,
+            q.question_text,
+            q.sort_order,
+            CASE
+                WHEN q.staff_user_id = {$staffUserId} THEN 1
+                WHEN ska.id IS NOT NULL THEN 2
+                WHEN q.supervisor_id = {$supervisorId} THEN 3
+                ELSE 4
+            END AS scope_order
+        FROM kpi_questions q
+        LEFT JOIN staff_kpi_assignments ska
+            ON ska.kpi_question_id = q.id
+           AND ska.staff_user_id = {$staffUserId}
+           AND ska.section_id = q.section_id
+        WHERE q.company_id = {$companyId}
+          AND q.section_id = {$sectionId}
+          AND q.is_active = 1
+          AND (
+                q.staff_user_id = {$staffUserId}
+                OR ska.id IS NOT NULL
+                OR (q.supervisor_id = {$supervisorId} AND q.staff_user_id IS NULL)
+                OR (
+                    q.department = '{$department}'
+                    AND q.supervisor_id IS NULL
+                    AND q.staff_user_id IS NULL
+                )
+          )
+        ORDER BY scope_order ASC, q.sort_order ASC, q.id ASC
+    ");
+
+    if (!empty($rows)) {
+        return $rows;
+    }
+
+    /*
+     * Assignment data from the old system may be incomplete. The department
+     * baseline is the safest fallback because it remains scoped to the same
+     * company, section and staff department.
+     */
+    return apFetchAll($conn, "
+        SELECT q.id, q.question_text, q.sort_order, 4 AS scope_order
+        FROM kpi_questions q
+        WHERE q.company_id = {$companyId}
+          AND q.section_id = {$sectionId}
+          AND q.department = '{$department}'
+          AND q.is_active = 1
+        ORDER BY q.sort_order ASC, q.id ASC
+    ");
+}
+
 function apAudit($conn, $companyId, $userId, $action, $targetTable, $targetId, $description) {
     $action = apEsc($conn, $action);
     $targetTable = apEsc($conn, $targetTable);

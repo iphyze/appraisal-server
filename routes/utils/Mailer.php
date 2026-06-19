@@ -80,7 +80,8 @@ function sendMail(
     string $to,
     string $subject,
     string $htmlBody,
-    ?string $fromName = null
+    ?string $fromName = null,
+    array $cc = []
 ): bool|string {
     $to = trim($to);
 
@@ -151,6 +152,23 @@ function sendMail(
         $mail->addReplyTo($smtpUser, $fromName);
         $mail->addAddress($to);
 
+        $seenCc = [];
+        foreach ($cc as $ccAddress) {
+            $ccAddress = strtolower(trim((string) $ccAddress));
+
+            if (
+                $ccAddress === ''
+                || $ccAddress === strtolower($to)
+                || isset($seenCc[$ccAddress])
+                || !isDeliverableEmail($ccAddress)
+            ) {
+                continue;
+            }
+
+            $mail->addCC($ccAddress);
+            $seenCc[$ccAddress] = true;
+        }
+
         $mail->isHTML(true);
         $mail->Subject = $subject;
         $mail->Body = $htmlBody;
@@ -165,6 +183,7 @@ function sendMail(
             'subject'   => $subject,
             'smtp_host' => $smtpHost,
             'smtp_port' => $smtpPort,
+            'cc_count'   => count($seenCc),
         ]);
 
         $mail->send();

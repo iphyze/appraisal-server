@@ -244,6 +244,7 @@ $routes = [
 
     // Exports
     '/exports/appraisals/excel' => 'routes/exports/AppraisalExcelExport.php',
+    '/exports/users/excel'      => 'routes/exports/UsersExcelExport.php',
 
     // Manual Email
     '/mail/recipients' => 'routes/mail/GetMailRecipients.php',

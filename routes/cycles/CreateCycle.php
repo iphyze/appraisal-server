@@ -4,160 +4,218 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 
-header('Content-Type: application/json');
+header('Content-Type: application/json; charset=UTF-8');
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        throw new Exception("Bad Request: Only POST method is allowed", 400);
+        throw new Exception('Bad Request: Only POST method is allowed.', 405);
     }
 
-    // Only super_admin or admin can create cycles
     $userData          = requireRoles(['super_admin', 'admin']);
-    $loggedInUserId    = (int) $userData['id'];
-    $loggedInUserEmail = $userData['email'];
-    $loggedInUserRole  = $userData['role'];
-    $loggedInCompanyId = (int) $userData['company_id'];
+    $loggedInUserId    = (int) ($userData['id'] ?? 0);
+    $loggedInUserEmail = (string) ($userData['email'] ?? '');
+    $loggedInUserRole  = authRoleKey($userData['role'] ?? '');
+    $loggedInCompanyId = (int) ($userData['company_id'] ?? 0);
 
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
-        throw new Exception("Invalid request format. Expected JSON object.", 400);
+        throw new Exception('Invalid request format. Expected JSON object.', 400);
     }
 
-    // Required fields
-    $requiredFields = ['year', 'title'];
-    foreach ($requiredFields as $field) {
-        if (!isset($data[$field]) || trim($data[$field]) === '') {
-            throw new Exception("Field '{$field}' is required.", 400);
-        }
+    $year      = isset($data['year']) ? (int) $data['year'] : 0;
+    $title     = trim((string) ($data['title'] ?? ''));
+    $startDate = trim((string) ($data['start_date'] ?? '')) ?: null;
+    $endDate   = trim((string) ($data['end_date'] ?? '')) ?: null;
+    $isActive  = isset($data['is_active']) ? (int) $data['is_active'] : 0;
+
+    if ($title === '') {
+        throw new Exception("Field 'title' is required.", 400);
     }
 
-    $year      = (int) $data['year'];
-    $title     = trim($data['title']);
-    $startDate = isset($data['start_date']) ? trim($data['start_date']) : null;
-    $endDate   = isset($data['end_date'])   ? trim($data['end_date'])   : null;
-    $isActive  = isset($data['is_active'])  ? (int) $data['is_active']  : 0;
-
-    // Validate year
     $currentYear = (int) date('Y');
     if ($year < 2020 || $year > $currentYear + 5) {
-        throw new Exception("Invalid year. Must be between 2020 and " . ($currentYear + 5) . ".", 400);
+        throw new Exception('Invalid year. Must be between 2020 and ' . ($currentYear + 5) . '.', 400);
     }
 
-    // Validate dates if provided
-    if ($startDate && !strtotime($startDate)) {
-        throw new Exception("Invalid start_date format. Use YYYY-MM-DD.", 400);
+    if ($startDate !== null && !strtotime($startDate)) {
+        throw new Exception('Invalid start_date format. Use YYYY-MM-DD.', 400);
     }
-    if ($endDate && !strtotime($endDate)) {
-        throw new Exception("Invalid end_date format. Use YYYY-MM-DD.", 400);
+    if ($endDate !== null && !strtotime($endDate)) {
+        throw new Exception('Invalid end_date format. Use YYYY-MM-DD.', 400);
     }
-    if ($startDate && $endDate && strtotime($startDate) >= strtotime($endDate)) {
-        throw new Exception("start_date must be before end_date.", 400);
+    if ($startDate !== null && $endDate !== null && strtotime($startDate) > strtotime($endDate)) {
+        throw new Exception('start_date cannot be after end_date.', 400);
     }
 
-    /**
-     * company_id:
-     *   super_admin can create for any company
-     *   admin is locked to their own company
-     */
+    $isActive = $isActive === 1 ? 1 : 0;
+
     if ($loggedInUserRole === 'super_admin' && isset($data['company_id'])) {
         $companyId = (int) $data['company_id'];
     } else {
         $companyId = $loggedInCompanyId;
     }
 
-    // Validate company exists
-    $companyStmt = $conn->prepare("SELECT id FROM companies WHERE id = ? AND is_active = 1 LIMIT 1");
-    $companyStmt->bind_param("i", $companyId);
-    $companyStmt->execute();
-    if ($companyStmt->get_result()->num_rows === 0) {
-        throw new Exception("Company not found or inactive.", 404);
+    if ($companyId <= 0) {
+        throw new Exception('Please select a valid company.', 400);
     }
+
+    $companyStmt = $conn->prepare('SELECT id FROM companies WHERE id = ? AND is_active = 1 LIMIT 1');
+    if (!$companyStmt) {
+        throw new Exception('Database error: ' . $conn->error, 500);
+    }
+    $companyStmt->bind_param('i', $companyId);
+    $companyStmt->execute();
+    $companyExists = $companyStmt->get_result()->num_rows > 0;
     $companyStmt->close();
 
-    // Check for duplicate year within the same company
-    $dupStmt = $conn->prepare("
-        SELECT id FROM appraisal_cycles
-        WHERE company_id = ? AND year = ?
+    if (!$companyExists) {
+        throw new Exception('Company not found or inactive.', 404);
+    }
+
+    /*
+     * Multiple appraisal cycles are allowed in the same company and year.
+     * Only an exact duplicate cycle (same title and same date window) is blocked.
+     */
+    $duplicateStmt = $conn->prepare("
+        SELECT id
+        FROM appraisal_cycles
+        WHERE company_id = ?
+          AND year = ?
+          AND LOWER(TRIM(title)) = LOWER(TRIM(?))
+          AND COALESCE(start_date, '') = COALESCE(?, '')
+          AND COALESCE(end_date, '') = COALESCE(?, '')
         LIMIT 1
     ");
-    $dupStmt->bind_param("ii", $companyId, $year);
-    $dupStmt->execute();
-    if ($dupStmt->get_result()->num_rows > 0) {
-        throw new Exception("An appraisal cycle for year {$year} already exists for this company.", 400);
+    if (!$duplicateStmt) {
+        throw new Exception('Database error: ' . $conn->error, 500);
     }
-    $dupStmt->close();
+    $duplicateStmt->bind_param('iisss', $companyId, $year, $title, $startDate, $endDate);
+    $duplicateStmt->execute();
+    $duplicateExists = $duplicateStmt->get_result()->num_rows > 0;
+    $duplicateStmt->close();
 
-    /**
-     * If this cycle is being set as active, deactivate all other cycles
-     * for the same company first — only one active cycle per company at a time
-     */
-    if ($isActive === 1) {
-        $deactivateStmt = $conn->prepare("
-            UPDATE appraisal_cycles SET is_active = 0 WHERE company_id = ?
-        ");
-        $deactivateStmt->bind_param("i", $companyId);
-        $deactivateStmt->execute();
-        $deactivateStmt->close();
+    if ($duplicateExists) {
+        throw new Exception('An identical appraisal cycle already exists for this company and period.', 409);
     }
 
-    // Insert cycle
-    $insertStmt = $conn->prepare("
-        INSERT INTO appraisal_cycles (company_id, year, title, start_date, end_date, is_active, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ");
-    if (!$insertStmt) {
-        throw new Exception("Database error: " . $conn->error, 500);
+    $conn->begin_transaction();
+
+    try {
+        if ($isActive === 1) {
+            $deactivateStmt = $conn->prepare('
+                UPDATE appraisal_cycles
+                SET is_active = 0
+                WHERE company_id = ?
+            ');
+            if (!$deactivateStmt) {
+                throw new Exception('Database error: ' . $conn->error, 500);
+            }
+            $deactivateStmt->bind_param('i', $companyId);
+            $deactivateStmt->execute();
+            $deactivateStmt->close();
+        }
+
+        $insertStmt = $conn->prepare('
+            INSERT INTO appraisal_cycles
+                (company_id, year, title, start_date, end_date, is_active, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ');
+        if (!$insertStmt) {
+            throw new Exception('Database error: ' . $conn->error, 500);
+        }
+
+        $insertStmt->bind_param(
+            'iisssii',
+            $companyId,
+            $year,
+            $title,
+            $startDate,
+            $endDate,
+            $isActive,
+            $loggedInUserId
+        );
+
+        if (!$insertStmt->execute()) {
+            throw new Exception('Failed to create cycle: ' . $insertStmt->error, 500);
+        }
+
+        $newCycleId = (int) $insertStmt->insert_id;
+        $insertStmt->close();
+
+        $logStmt = $conn->prepare('
+            INSERT INTO audit_log
+                (company_id, user_id, action, target_table, target_id, description)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ');
+        if ($logStmt) {
+            $action = 'create_cycle';
+            $targetTable = 'appraisal_cycles';
+            $description = sprintf(
+                '%s created appraisal cycle: %s (%d), %s to %s',
+                $loggedInUserEmail,
+                $title,
+                $year,
+                $startDate ?: 'no start date',
+                $endDate ?: 'no end date'
+            );
+            $logStmt->bind_param(
+                'iissis',
+                $companyId,
+                $loggedInUserId,
+                $action,
+                $targetTable,
+                $newCycleId,
+                $description
+            );
+            $logStmt->execute();
+            $logStmt->close();
+        }
+
+        $conn->commit();
+    } catch (Throwable $transactionError) {
+        $conn->rollback();
+        throw $transactionError;
     }
 
-    $insertStmt->bind_param("iisssii", $companyId, $year, $title, $startDate, $endDate, $isActive, $loggedInUserId);
-    if (!$insertStmt->execute()) {
-        throw new Exception("Failed to create cycle: " . $insertStmt->error, 500);
-    }
-
-    $newCycleId = $insertStmt->insert_id;
-    $insertStmt->close();
-
-    // Log action
-    $logStmt = $conn->prepare("
-        INSERT INTO audit_log (company_id, user_id, action, target_table, target_id, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ");
-    if ($logStmt) {
-        $action      = "create_cycle";
-        $targetTable = "appraisal_cycles";
-        $description = "{$loggedInUserEmail} created appraisal cycle: {$title} ({$year})";
-        $logStmt->bind_param("iissis", $companyId, $loggedInUserId, $action, $targetTable, $newCycleId, $description);
-        $logStmt->execute();
-        $logStmt->close();
-    }
-
-    // Return created cycle
-    $fetchStmt = $conn->prepare("
-        SELECT ac.id, ac.year, ac.title, ac.start_date, ac.end_date,
-               ac.is_active, ac.created_at,
-               c.id AS company_id, c.code AS company_code, c.name AS company_name
+    $fetchStmt = $conn->prepare('
+        SELECT
+            ac.id,
+            ac.year,
+            ac.title,
+            ac.start_date,
+            ac.end_date,
+            ac.is_active,
+            ac.created_at,
+            ac.updated_at,
+            c.id AS company_id,
+            c.code AS company_code,
+            c.name AS company_name
         FROM appraisal_cycles ac
         INNER JOIN companies c ON c.id = ac.company_id
         WHERE ac.id = ?
         LIMIT 1
-    ");
-    $fetchStmt->bind_param("i", $newCycleId);
+    ');
+    if (!$fetchStmt) {
+        throw new Exception('Database error: ' . $conn->error, 500);
+    }
+    $fetchStmt->bind_param('i', $newCycleId);
     $fetchStmt->execute();
     $newCycle = $fetchStmt->get_result()->fetch_assoc();
     $fetchStmt->close();
 
-    http_response_code(200);
+    http_response_code(201);
     echo json_encode([
-        "status"  => "Success",
-        "message" => "Appraisal cycle created successfully",
-        "data"    => $newCycle
+        'status'  => 'Success',
+        'message' => 'Appraisal cycle created successfully.',
+        'data'    => $newCycle,
     ]);
-
-} catch (Exception $e) {
-    error_log("CreateCycle Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
+} catch (Throwable $e) {
+    error_log('CreateCycle Error: ' . $e->getMessage());
+    $code = (int) $e->getCode();
+    $code = ($code >= 400 && $code <= 599) ? $code : 500;
+    http_response_code($code);
     echo json_encode([
-        "status"  => "Failed",
-        "message" => $e->getMessage()
+        'status'  => 'Failed',
+        'message' => $e->getMessage(),
     ]);
 }

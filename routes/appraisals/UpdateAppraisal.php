@@ -61,8 +61,21 @@ try {
     $isConductingAppraiser = in_array($loggedInRoleKey, ['admin', 'supervisor'], true)
         && (int) $appraisal['supervisor_id'] === $loggedInUserId;
 
-    if ($loggedInRoleKey === 'supervisor' && !$isConductingAppraiser) {
-        throw new Exception('Unauthorized: You can only update appraisals you conducted.', 403);
+    if (!$isConductingAppraiser) {
+        throw new Exception('Unauthorized: Only the assigned supervisor can update this appraisal.', 403);
+    }
+
+    $activeAssignment = apFetchOne($conn, "
+        SELECT id
+        FROM supervisor_assignments
+        WHERE cycle_id = " . (int) $appraisal['cycle_id'] . "
+          AND staff_id = " . (int) $appraisal['staff_user_id'] . "
+          AND supervisor_id = {$loggedInUserId}
+        LIMIT 1
+    ");
+
+    if (!$activeAssignment) {
+        throw new Exception('This employee is no longer assigned to you for the appraisal cycle.', 403);
     }
 
     if ($isConductingAppraiser && (int) $appraisal['update_count'] >= 2) {

@@ -39,12 +39,12 @@ try {
     $newActive = null;
 
     if (isset($data['name']) && trim($data['name']) !== '') {
-        $newName = trim($data['name']);
+        $newName = preg_replace('/\s+/u', ' ', trim((string) $data['name']));
         if (mb_strlen($newName) > 150) {
             throw new Exception("Department name must not exceed 150 characters.", 400);
         }
 
-        $dupStmt = $conn->prepare("SELECT id FROM departments WHERE company_id = ? AND name = ? AND id != ? LIMIT 1");
+        $dupStmt = $conn->prepare("SELECT id FROM departments WHERE company_id = ? AND LOWER(name) = LOWER(?) AND id != ? LIMIT 1");
         $dupStmt->bind_param('isi', $existing['company_id'], $newName, $departmentId);
         $dupStmt->execute();
         if ($dupStmt->get_result()->num_rows > 0) {

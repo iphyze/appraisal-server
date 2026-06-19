@@ -34,6 +34,28 @@ try {
     $cycleId = (int)($data['cycle_id'] ?? 0);
     $subject = trim((string)($data['subject'] ?? ''));
     $customMessage = trim((string)($data['custom_message'] ?? ''));
+
+    $rawCc = $data['cc_emails'] ?? [];
+    if (is_string($rawCc)) {
+        $rawCc = explode(',', $rawCc);
+    }
+
+    $ccCandidates = array_values(array_filter(
+        array_map(static fn($item) => trim((string) $item), (array) $rawCc),
+        static fn($item) => $item !== ''
+    ));
+
+    foreach ($ccCandidates as $ccAddress) {
+        if (!filter_var($ccAddress, FILTER_VALIDATE_EMAIL)) {
+            throw new Exception("Invalid CC email address: {$ccAddress}", 400);
+        }
+    }
+
+    $ccEmails = cleanEmailList($ccCandidates);
+    if (count($ccEmails) > 20) {
+        throw new Exception('A maximum of 20 unique CC addresses is allowed.', 400);
+    }
+
     if ($subject === '' || $customMessage === '') throw new Exception('Subject and message are required.', 400);
 
     $cycle = $cycleId > 0 ? resolveMailCycle($conn, $userData, $cycleId) : null;
@@ -79,7 +101,7 @@ try {
             'app_url' => $appUrl,
             'sender_name' => $senderName,
         ]);
-        $sent = sendMail($email, $subject, $html, $companyName);
+        $sent = sendMail($email, $subject, $html, $companyName, $ccEmails);
         if ($sent === true) {
             $results['sent'][] = ['name' => $recipientName, 'email' => $email];
             if (!empty($recipient['recipient_id'])) {
@@ -92,7 +114,8 @@ try {
 
     $sentCount = count($results['sent']);
     $failedCount = count($results['failed']);
-    $description = "{$senderName} sent appraisal communication ({$mode}). Sent: {$sentCount}; Failed: {$failedCount}. Subject: {$subject}";
+    $ccCount = count($ccEmails);
+    $description = "{$senderName} sent appraisal communication ({$mode}). Sent: {$sentCount}; Failed: {$failedCount}; CC: {$ccCount}. Subject: {$subject}";
     $log = $conn->prepare('INSERT INTO audit_log (company_id, user_id, action, target_table, target_id, description) VALUES (?, ?, ?, ?, ?, ?)');
     if ($log) {
         $action = 'send_manual_email'; $table = 'users'; $targetId = 0;
@@ -100,7 +123,18 @@ try {
         $log->execute(); $log->close();
     }
 
-    echo json_encode(['status' => 'Success', 'message' => "Email operation complete. Sent: {$sentCount}, Failed: {$failedCount}.", 'data' => ['sent_count' => $sentCount, 'failed_count' => $failedCount, 'sent' => $results['sent'], 'failed' => $results['failed']]]);
+    echo json_encode([
+        'status' => 'Success',
+        'message' => "Email operation complete. Sent: {$sentCount}, Failed: {$failedCount}.",
+        'data' => [
+            'sent_count' => $sentCount,
+            'failed_count' => $failedCount,
+            'cc_count' => $ccCount,
+            'cc_emails' => $ccEmails,
+            'sent' => $results['sent'],
+            'failed' => $results['failed'],
+        ],
+    ]);
 } catch (Exception $e) {
     $code = (int)$e->getCode(); $code = $code >= 400 && $code <= 599 ? $code : 500;
     http_response_code($code);

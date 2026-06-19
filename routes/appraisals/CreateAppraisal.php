@@ -66,23 +66,30 @@ try {
         }
     }
 
-    $supervisorId = 0;
-    if ($loggedInRoleKey === 'supervisor') {
-        $supervisorId = $loggedInUserId;
-        $assignment = apFetchOne($conn, "SELECT id FROM supervisor_assignments WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} AND staff_id = {$staffUserId} LIMIT 1");
-        if (!$assignment) throw new Exception('This staff member is not assigned to you for this appraisal cycle.', 403);
-        $onboard = apFetchOne($conn, "SELECT id FROM supervisor_onboarding WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} LIMIT 1");
-        if (!$onboard) throw new Exception('You need to complete supervisor onboarding before appraising staff for this cycle.', 403);
-    } else {
-        $assignment = apFetchOne($conn, "SELECT supervisor_id FROM supervisor_assignments WHERE cycle_id = {$cycleId} AND staff_id = {$staffUserId} ORDER BY id ASC LIMIT 1");
-        if (!$assignment) throw new Exception('Assign this employee to an appraiser before starting the appraisal.', 400);
-        $supervisorId = (int) $assignment['supervisor_id'];
-
-        // Management users may prepare or submit an appraisal, but cannot bypass
-        // the onboarding gate of the appraiser to whom the employee is assigned.
-        $onboard = apFetchOne($conn, "SELECT id FROM supervisor_onboarding WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} LIMIT 1");
-        if (!$onboard) throw new Exception('The assigned appraiser must complete onboarding before this appraisal can begin.', 403);
+    if (!in_array($loggedInRoleKey, ['admin', 'supervisor'], true)) {
+        throw new Exception('Super administrators may view appraisals, but only the assigned supervisor can start one.', 403);
     }
+
+    $assignment = apFetchOne($conn, "
+        SELECT id, supervisor_id
+        FROM supervisor_assignments
+        WHERE cycle_id = {$cycleId}
+          AND staff_id = {$staffUserId}
+        ORDER BY id ASC
+        LIMIT 1
+    ");
+
+    if (!$assignment) {
+        throw new Exception('Assign this employee to a supervisor before starting the appraisal.', 400);
+    }
+
+    $supervisorId = (int) $assignment['supervisor_id'];
+    if ($supervisorId !== $loggedInUserId) {
+        throw new Exception('This employee is not assigned to you for this appraisal cycle.', 403);
+    }
+
+    $onboard = apFetchOne($conn, "SELECT id FROM supervisor_onboarding WHERE cycle_id = {$cycleId} AND supervisor_id = {$supervisorId} LIMIT 1");
+    if (!$onboard) throw new Exception('Complete supervisor onboarding before starting this appraisal.', 403);
 
     $duplicate = apFetchOne($conn, "SELECT id FROM appraisals WHERE staff_user_id = {$staffUserId} AND cycle_id = {$cycleId} LIMIT 1");
     if ($duplicate) throw new Exception('This staff member already has an appraisal for the selected cycle.', 400);
