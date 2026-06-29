@@ -216,17 +216,32 @@ try {
         $types         .= "s";
     }
 
-    // role — only super_admin can change roles
+    // role permissions:
+    // - super_admin may assign any system role;
+    // - admin may switch eligible company users between supervisor and staff;
+    // - admin/admin-level accounts remain protected by the target-role check above.
     if (isset($data['role'])) {
-        if ($loggedInUserRole !== 'super_admin') {
-            throw new Exception("Unauthorized: Only super admins can change user roles.", 403);
+        $loggedInRoleKey = authRoleKey($loggedInUserRole);
+        $requestedRole   = authRoleKey($data['role']);
+
+        if ($loggedInRoleKey === 'super_admin') {
+            $allowedRoles = ['super_admin', 'admin', 'supervisor', 'staff'];
+        } else {
+            $allowedRoles = ['supervisor', 'staff'];
         }
-        $allowedRoles = ['super_admin', 'admin', 'supervisor', 'staff'];
-        if (!in_array($data['role'], $allowedRoles)) {
-            throw new Exception("Invalid role. Allowed: " . implode(', ', $allowedRoles), 400);
+
+        if (!in_array($requestedRole, $allowedRoles, true)) {
+            $message = $loggedInRoleKey === 'admin'
+                ? "Unauthorized: Admins can only assign Supervisor or Staff roles."
+                : "Invalid role. Allowed: " . implode(', ', $allowedRoles);
+            throw new Exception($message, $loggedInRoleKey === 'admin' ? 403 : 400);
         }
+
         $roleStmt = $conn->prepare("SELECT id FROM roles WHERE name = ? LIMIT 1");
-        $roleStmt->bind_param("s", $data['role']);
+        if (!$roleStmt) {
+            throw new Exception("Database error: " . $conn->error, 500);
+        }
+        $roleStmt->bind_param("s", $requestedRole);
         $roleStmt->execute();
         $roleRow = $roleStmt->get_result()->fetch_assoc();
         $roleStmt->close();
@@ -234,9 +249,15 @@ try {
         if (!$roleRow) {
             throw new Exception("Role not found in system.", 500);
         }
+
         $updateFields[] = "role_id = ?";
         $params[]       = (int) $roleRow['id'];
         $types         .= "i";
+
+        // Non-admin roles must not retain a stale administrator scope value.
+        if (!in_array($requestedRole, ['admin', 'super_admin'], true)) {
+            $updateFields[] = "staff_scope = NULL";
+        }
     }
 
     // is_active — activate or deactivate
