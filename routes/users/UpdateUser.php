@@ -18,6 +18,7 @@ try {
     $loggedInUserId    = (int) $userData['id'];
     $loggedInUserEmail = $userData['email'];
     $loggedInUserRole  = $userData['role'];
+    $loggedInRoleKey   = $userData['role_key'] ?? authRoleKey($loggedInUserRole);
     $loggedInCompanyId = (int) $userData['company_id'];
 
     // ── Parse body ────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ try {
     // ── Authorization checks ──────────────────────────────────────────────────
 
     // Admin can only update users within their own company
-    if ($loggedInUserRole !== 'super_admin' &&
+    if ($loggedInRoleKey !== 'super_admin' &&
         (int) $existingUser['company_id'] !== $loggedInCompanyId
     ) {
         throw new Exception("Unauthorized: You can only update users within your company.", 403);
@@ -69,7 +70,7 @@ try {
 
     // Staff scope limits ordinary staff records only. This does not expand
     // administrator mutation permissions; the explicit role check below remains.
-    if (authRoleKey($loggedInUserRole) === 'admin') {
+    if ($loggedInRoleKey === 'admin') {
         $adminScope = $userData['staff_scope'] ?? 'All';
         if (
             $adminScope !== 'All' &&
@@ -83,7 +84,7 @@ try {
 
     // Admin cannot update another admin or super_admin
     if (
-        authRoleKey($loggedInUserRole) === 'admin' &&
+        $loggedInRoleKey === 'admin' &&
         in_array($targetRoleKey, ['admin', 'super_admin'], true)
     ) {
         throw new Exception("Unauthorized: You cannot update an admin account.", 403);
@@ -188,23 +189,29 @@ try {
         $types         .= "s";
     }
 
-    // staff_type — only super_admin or admin (All scope) can change this
-    if (isset($data['staff_type'])) {
-        if ($loggedInUserRole === 'admin' && ($userData['staff_scope'] ?? 'All') !== 'All') {
-            throw new Exception("Unauthorized: You cannot change a user's staff type.", 403);
-        }
+    // staff_type — super admins and admins may update eligible users.
+    // Company, staff-scope and protected-role checks have already been applied
+    // above. Ignore an unchanged value so ordinary profile edits do not trigger
+    // a permission branch merely because the frontend submitted the full form.
+    if (array_key_exists('staff_type', $data)) {
+        $requestedStaffType = trim((string) ($data['staff_type'] ?? ''));
         $allowedTypes = ['Local', 'Expatriate'];
-        if (!in_array($data['staff_type'], $allowedTypes)) {
+
+        if (!in_array($requestedStaffType, $allowedTypes, true)) {
             throw new Exception("Invalid staff_type. Allowed: Local, Expatriate.", 400);
         }
-        $updateFields[] = "staff_type = ?";
-        $params[]       = $data['staff_type'];
-        $types         .= "s";
+
+        $currentStaffType = trim((string) ($existingUser['staff_type'] ?? ''));
+        if ($requestedStaffType !== $currentStaffType) {
+            $updateFields[] = "staff_type = ?";
+            $params[]       = $requestedStaffType;
+            $types         .= "s";
+        }
     }
 
     // staff_scope — only super_admin can change an admin's scope
     if (isset($data['staff_scope'])) {
-        if ($loggedInUserRole !== 'super_admin') {
+        if ($loggedInRoleKey !== 'super_admin') {
             throw new Exception("Unauthorized: Only super admins can change staff scope.", 403);
         }
         $allowedScopes = ['All', 'Local', 'Expatriate'];
@@ -221,7 +228,6 @@ try {
     // - admin may switch eligible company users between supervisor and staff;
     // - admin/admin-level accounts remain protected by the target-role check above.
     if (isset($data['role'])) {
-        $loggedInRoleKey = authRoleKey($loggedInUserRole);
         $requestedRole   = authRoleKey($data['role']);
 
         if ($loggedInRoleKey === 'super_admin') {
@@ -262,7 +268,7 @@ try {
 
     // is_active — activate or deactivate
     if (isset($data['is_active'])) {
-        if ($loggedInUserRole !== 'super_admin' && $loggedInUserRole !== 'admin') {
+        if (!in_array($loggedInRoleKey, ['super_admin', 'admin'], true)) {
             throw new Exception("Unauthorized: You cannot change account status.", 403);
         }
         // Prevent deactivating yourself
