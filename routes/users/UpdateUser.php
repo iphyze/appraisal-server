@@ -38,7 +38,7 @@ try {
 
     // ── Fetch existing user ───────────────────────────────────────────────────
     $checkStmt = $conn->prepare("
-        SELECT u.id, u.email, u.staff_type, u.role_id, u.company_id,
+        SELECT u.id, u.email, u.staff_type, u.role_id, u.company_id, u.is_supervisor,
                r.name AS role
         FROM users u
         INNER JOIN roles r ON r.id = u.role_id
@@ -67,6 +67,35 @@ try {
     }
 
     $targetRoleKey = authRoleKey($existingUser['role'] ?? '');
+
+    // Determine whether this update would remove appraisal-supervisor capability.
+    // Supervisor-role users are inherently capable; Admin users require the explicit flag.
+    // Historical responsibilities never block a change, but active-cycle responsibilities do.
+    $currentCanConductAppraisals =
+        $targetRoleKey === 'supervisor'
+        || ($targetRoleKey === 'admin' && (int) ($existingUser['is_supervisor'] ?? 0) === 1);
+
+    $requestedFinalRoleKey = array_key_exists('role', $data)
+        ? authRoleKey($data['role'])
+        : $targetRoleKey;
+
+    if ($requestedFinalRoleKey === 'supervisor') {
+        $requestedCanConductAppraisals = true;
+    } elseif ($requestedFinalRoleKey === 'admin') {
+        $requestedSupervisorFlag = array_key_exists('is_supervisor', $data)
+            ? (int) ((bool) $data['is_supervisor'])
+            : (int) ($existingUser['is_supervisor'] ?? 0);
+        $requestedCanConductAppraisals = $requestedSupervisorFlag === 1;
+    } else {
+        $requestedCanConductAppraisals = false;
+    }
+
+    if ($currentCanConductAppraisals && !$requestedCanConductAppraisals) {
+        $dependencies = supervisorCapabilityDependencies($targetId);
+        if (!empty($dependencies['has_active_dependencies'])) {
+            throw new Exception(supervisorCapabilityDependencyMessage($dependencies), 409);
+        }
+    }
 
     // Staff scope limits ordinary staff records only. This does not expand
     // administrator mutation permissions; the explicit role check below remains.
@@ -264,6 +293,40 @@ try {
         if (!in_array($requestedRole, ['admin', 'super_admin'], true)) {
             $updateFields[] = "staff_scope = NULL";
         }
+
+        // Keep the capability column internally consistent for roles whose
+        // supervisor behaviour is inherent or explicitly disallowed.
+        if ($requestedRole === 'supervisor') {
+            $updateFields[] = "is_supervisor = 1";
+        } elseif (in_array($requestedRole, ['staff', 'super_admin'], true)) {
+            $updateFields[] = "is_supervisor = 0";
+        }
+    }
+
+    // is_supervisor is an explicit capability switch for Admin accounts only.
+    // Admin accounts themselves remain protected by the existing permission
+    // model, so only a Super Admin can change this flag through user editing.
+    if (array_key_exists('is_supervisor', $data)) {
+        if ($loggedInRoleKey !== 'super_admin') {
+            throw new Exception("Unauthorized: Only super admins can change an Admin's supervisor capability.", 403);
+        }
+
+        $finalRoleKey = isset($data['role'])
+            ? authRoleKey($data['role'])
+            : $targetRoleKey;
+
+        if ($finalRoleKey !== 'admin') {
+            throw new Exception("Field 'is_supervisor' is only applicable to Admin accounts.", 400);
+        }
+
+        $rawSupervisorCapability = $data['is_supervisor'];
+        if (!in_array($rawSupervisorCapability, [0, 1, '0', '1', false, true], true)) {
+            throw new Exception("Field 'is_supervisor' must be 0 or 1.", 400);
+        }
+
+        $updateFields[] = "is_supervisor = ?";
+        $params[]       = (int) ((bool) $rawSupervisorCapability);
+        $types         .= "i";
     }
 
     // is_active — activate or deactivate
@@ -329,7 +392,7 @@ try {
         SELECT
             u.id, u.staff_id, u.first_name, u.last_name, u.email,
             u.username, u.department, u.job_title, u.staff_type,
-            u.staff_scope, u.location, u.unique_ref, u.date_of_joining,
+            u.staff_scope, u.is_supervisor, u.location, u.unique_ref, u.date_of_joining,
             u.is_active, u.updated_at,
             r.name  AS role,
             c.id    AS company_id,

@@ -57,8 +57,8 @@ try {
 
     if ($loggedInRole === 'supervisor') {
         $supervisorId = $loggedInUserId;
-    } elseif ($loggedInRole === 'admin' && (!isset($data['supervisor_id']) || !is_numeric($data['supervisor_id']))) {
-        // Admin may also conduct appraisals; no explicit target means onboard the logged-in admin.
+    } elseif ($loggedInRole === 'admin' && userCanConductAppraisals($userData) && (!isset($data['supervisor_id']) || !is_numeric($data['supervisor_id']))) {
+        // Only administrators explicitly marked as supervisors may onboard themselves.
         $supervisorId = $loggedInUserId;
     } elseif (in_array($loggedInRole, ['super_admin', 'admin'], true)) {
         if (!isset($data['supervisor_id']) || !is_numeric($data['supervisor_id'])) {
@@ -86,7 +86,7 @@ try {
         FROM users u
         INNER JOIN roles r ON r.id = u.role_id
         WHERE u.id = ?
-          AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor')
+          AND " . appraiserRoleWhere('r', 'u') . "
         LIMIT 1
     ");
 

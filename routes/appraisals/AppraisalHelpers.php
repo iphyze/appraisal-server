@@ -89,6 +89,15 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
             ? 'overall'
             : 'per_question';
 
+        // Question-level weighting is intentionally separate from the existing
+        // section weight. It only changes how a KPI section average is derived.
+        // Existing/legacy requests omit this field and therefore remain equal-weighted.
+        $questionWeightingMode = 'equal';
+        if ($section['type'] === 'kpi' && $ratingMode === 'per_question') {
+            $requestedWeightingMode = strtolower(trim((string)($sectionPayload['question_weighting_mode'] ?? 'equal')));
+            $questionWeightingMode = $requestedWeightingMode === 'custom' ? 'custom' : 'equal';
+        }
+
         $overallRating = null;
         if ($ratingMode === 'overall') {
             $overallRating = (float)($sectionPayload['overall_rating'] ?? 0);
@@ -98,6 +107,8 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
         }
 
         $ratings = [];
+        $questionWeightTotal = 0.0;
+        $weightedRatingTotal = 0.0;
 
         foreach ($responses as $response) {
             if (!isset($response['question_id'])) {
@@ -129,7 +140,7 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
 
                 if ($questionId > 0) {
                     $question = apFetchOne($conn, "
-                        SELECT id, question_text
+                        SELECT id, question_text, weight_percent
                         FROM kpi_questions
                         WHERE id = {$questionId}
                           AND company_id = {$companyId}
@@ -146,6 +157,26 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                     throw new Exception("KPI question text is required for section {$section['code']}.", 400);
                 }
 
+                // The final appraisal payload is authoritative for custom weights.
+                // This guarantees that edits reopen and recalculate from the exact
+                // per-staff weights chosen at appraisal time rather than from a later
+                // change to a department/supervisor question template.
+                $questionWeight = null;
+                if ($questionWeightingMode === 'custom') {
+                    $rawQuestionWeight = $response['question_weight'] ?? $response['weight_percent'] ?? null;
+                    if ($rawQuestionWeight === null || $rawQuestionWeight === '' || !is_numeric($rawQuestionWeight)) {
+                        throw new Exception("A weight is required for every KPI question when custom weighting is enabled in section {$section['code']}.", 400);
+                    }
+
+                    $questionWeight = round((float)$rawQuestionWeight, 2);
+                    if ($questionWeight <= 0 || $questionWeight > 100) {
+                        throw new Exception('Each KPI question weight must be greater than 0 and no more than 100%.', 400);
+                    }
+
+                    $questionWeightTotal += $questionWeight;
+                    $weightedRatingTotal += ((float)$rating) * ($questionWeight / 100);
+                }
+
                 if (!$question || $isCustom || $isEdited || trim((string)$question['question_text']) !== $incomingText) {
                     $questionTextForInsert = apEsc($conn, $incomingText);
                     $sortOrder = isset($response['sort_order']) ? (int)$response['sort_order'] : 0;
@@ -154,9 +185,14 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                     $staffSql = $staffUserId > 0 ? (int)$staffUserId : 'NULL';
                     $createdBySql = $loggedInUserId > 0 ? (int)$loggedInUserId : 'NULL';
 
+                    // A KPI added during appraisal becomes an individual-staff question.
+                    // If the supervisor is using custom weighting, retain that selected
+                    // weight as the suggested starting point for a future appraisal of
+                    // this staff member. Existing template questions are never overwritten.
+                    $newQuestionWeightSql = $questionWeight === null ? 'NULL' : (string)(float)$questionWeight;
                     $insertQuestion = "INSERT INTO kpi_questions
-                        (company_id, section_id, department, supervisor_id, staff_user_id, question_text, sort_order, is_active, created_by, updated_by)
-                        VALUES ({$companyId}, {$sectionId}, {$departmentSql}, {$supervisorSql}, {$staffSql}, '{$questionTextForInsert}', {$sortOrder}, 1, {$createdBySql}, {$createdBySql})";
+                        (company_id, section_id, department, supervisor_id, staff_user_id, question_text, weight_percent, sort_order, is_active, created_by, updated_by)
+                        VALUES ({$companyId}, {$sectionId}, {$departmentSql}, {$supervisorSql}, {$staffSql}, '{$questionTextForInsert}', {$newQuestionWeightSql}, {$sortOrder}, 1, {$createdBySql}, {$createdBySql})";
                     if (!$conn->query($insertQuestion)) {
                         throw new Exception('Unable to save the customised KPI question: ' . $conn->error, 500);
                     }
@@ -168,7 +204,8 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
                 }
 
                 $questionText = apEsc($conn, $incomingText);
-                if (!$conn->query("INSERT INTO appraisal_kpi_responses (appraisal_id, section_id, kpi_question_id, question_text, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$ratingSql})")) {
+                $questionWeightSql = $questionWeight === null ? 'NULL' : (string)(float)$questionWeight;
+                if (!$conn->query("INSERT INTO appraisal_kpi_responses (appraisal_id, section_id, kpi_question_id, question_text, question_weight, rating) VALUES ({$appraisalId}, {$sectionId}, {$questionId}, '{$questionText}', {$questionWeightSql}, {$ratingSql})")) {
                     throw new Exception('Unable to save KPI appraisal response: ' . $conn->error, 500);
                 }
                 $kpiSnapshot[] = $incomingText;
@@ -197,10 +234,20 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
             }
         }
 
-        $avg = $ratingMode === 'overall'
-            ? $overallRating
-            : (count($ratings) ? array_sum($ratings) / count($ratings) : 0);
+        if ($section['type'] === 'kpi' && $ratingMode === 'per_question' && $questionWeightingMode === 'custom') {
+            if (abs($questionWeightTotal - 100.0) > 0.01) {
+                $formattedTotal = rtrim(rtrim(number_format($questionWeightTotal, 2, '.', ''), '0'), '.');
+                throw new Exception("KPI question weights for section {$section['code']} must total exactly 100%. Current total: {$formattedTotal}%.", 400);
+            }
+            $avg = $weightedRatingTotal;
+        } else {
+            $avg = $ratingMode === 'overall'
+                ? $overallRating
+                : (count($ratings) ? array_sum($ratings) / count($ratings) : 0);
+        }
 
+        // Existing section weighting is deliberately unchanged. The optional
+        // question weights only derive the KPI section average above.
         $weighted = $avg * (((float)$section['weight']) / 100);
         $summary += $weighted;
 
@@ -217,6 +264,7 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
             'weighted_score' => round($weighted, 4),
             'rating_mode' => $ratingMode,
             'overall_rating' => $ratingMode === 'overall' ? round($avg, 2) : null,
+            'question_weighting_mode' => $questionWeightingMode,
         ];
         $sectionScores[] = $scoreRow;
 
@@ -227,10 +275,11 @@ function apSaveResponsesAndScores($conn, $appraisalId, $companyId, $cycleId, arr
         $weightedScore = (float)$scoreRow['weighted_score'];
         $mode = apEsc($conn, $scoreRow['rating_mode']);
         $overallSql = $scoreRow['overall_rating'] === null ? 'NULL' : (string)(float)$scoreRow['overall_rating'];
+        $questionWeightingModeSql = apEsc($conn, $scoreRow['question_weighting_mode']);
 
         if (!$conn->query("INSERT INTO appraisal_section_scores
-            (appraisal_id, section_id, section_code, section_label, section_weight, section_avg, weighted_score, rating_mode, overall_rating)
-            VALUES ({$appraisalId}, {$sectionId}, '{$code}', '{$label}', {$weight}, {$sectionAvg}, {$weightedScore}, '{$mode}', {$overallSql})")) {
+            (appraisal_id, section_id, section_code, section_label, section_weight, section_avg, weighted_score, rating_mode, overall_rating, question_weighting_mode)
+            VALUES ({$appraisalId}, {$sectionId}, '{$code}', '{$label}', {$weight}, {$sectionAvg}, {$weightedScore}, '{$mode}', {$overallSql}, '{$questionWeightingModeSql}')")) {
             throw new Exception('Unable to save section score: ' . $conn->error, 500);
         }
     }

@@ -120,6 +120,18 @@ try {
         $types         .= "s";
     }
 
+    if (array_key_exists('weight_percent', $data)) {
+        $weightPercent = null;
+        if ($data['weight_percent'] !== null && $data['weight_percent'] !== '') {
+            if (!is_numeric($data['weight_percent'])) throw new Exception("Weight must be a number.", 400);
+            $weightPercent = round((float) $data['weight_percent'], 2);
+            if ($weightPercent <= 0 || $weightPercent > 100) throw new Exception("Weight must be greater than 0 and no more than 100.", 400);
+        }
+        $updateFields[] = "weight_percent = ?";
+        $params[]       = $weightPercent;
+        $types         .= "d";
+    }
+
     if (isset($data['sort_order'])) {
         $updateFields[] = "sort_order = ?";
         $params[]       = (int) $data['sort_order'];
@@ -136,8 +148,32 @@ try {
     if ($loggedInUserRole !== 'supervisor') {
 
         if (array_key_exists('supervisor_id', $data)) {
+            $nextSupervisorId = $data['supervisor_id'] ? (int) $data['supervisor_id'] : null;
+
+            if ($nextSupervisorId) {
+                $appraiserWhere = appraiserRoleWhere('r', 'u');
+                $supStmt = $conn->prepare("
+                    SELECT u.id
+                    FROM users u
+                    INNER JOIN roles r ON r.id = u.role_id
+                    WHERE u.id = ?
+                      AND u.company_id = ?
+                      AND u.is_active = 1
+                      AND {$appraiserWhere}
+                    LIMIT 1
+                ");
+                if (!$supStmt) throw new Exception("Database error: " . $conn->error, 500);
+                $existingCompanyId = (int) $existing['company_id'];
+                $supStmt->bind_param("ii", $nextSupervisorId, $existingCompanyId);
+                $supStmt->execute();
+                if ($supStmt->get_result()->num_rows === 0) {
+                    throw new Exception("Selected supervisor is not an active appraisal supervisor for this company.", 404);
+                }
+                $supStmt->close();
+            }
+
             $updateFields[] = "supervisor_id = ?";
-            $params[]       = $data['supervisor_id'] ? (int) $data['supervisor_id'] : null;
+            $params[]       = $nextSupervisorId;
             $types         .= "i";
         }
 

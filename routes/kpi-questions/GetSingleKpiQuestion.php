@@ -25,6 +25,7 @@ try {
             kq.id,
             kq.department,
             kq.question_text,
+            kq.weight_percent,
             kq.sort_order,
             kq.is_active,
             kq.created_at,

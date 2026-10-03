@@ -100,6 +100,72 @@ try {
         $types     .= "s";
     }
 
+    // Build pagination-independent filter options. Department choices must not
+    // be derived from the rows on the current page, otherwise searchable
+    // selects incorrectly hide departments that exist on later pages.
+    $departmentFilterQuery = "
+        FROM kpi_questions kq
+        INNER JOIN appraisal_sections s ON s.id = kq.section_id
+        INNER JOIN appraisal_cycles ac ON ac.id = s.cycle_id
+        WHERE 1=1
+    ";
+    $departmentFilterParams = [];
+    $departmentFilterTypes = '';
+
+    if ($clause['value'] !== null) {
+        $departmentFilterQuery .= " AND kq.company_id = ?";
+        $departmentFilterParams[] = $clause['value'];
+        $departmentFilterTypes .= 'i';
+    }
+
+    if ($sectionId) {
+        $departmentFilterQuery .= " AND kq.section_id = ?";
+        $departmentFilterParams[] = $sectionId;
+        $departmentFilterTypes .= 'i';
+    }
+
+    if ($cycleId) {
+        $departmentFilterQuery .= " AND s.cycle_id = ?";
+        $departmentFilterParams[] = $cycleId;
+        $departmentFilterTypes .= 'i';
+    }
+
+    if ($supervisorId) {
+        $departmentFilterQuery .= " AND kq.supervisor_id = ?";
+        $departmentFilterParams[] = $supervisorId;
+        $departmentFilterTypes .= 'i';
+    }
+
+    if ($staffUserId) {
+        $departmentFilterQuery .= " AND kq.staff_user_id = ?";
+        $departmentFilterParams[] = $staffUserId;
+        $departmentFilterTypes .= 'i';
+    }
+
+    if ($isActive !== null) {
+        $departmentFilterQuery .= " AND kq.is_active = ?";
+        $departmentFilterParams[] = $isActive;
+        $departmentFilterTypes .= 'i';
+    }
+
+    $departmentStmt = $conn->prepare("
+        SELECT DISTINCT TRIM(kq.department) AS department
+        " . $departmentFilterQuery . "
+        AND kq.department IS NOT NULL
+        AND TRIM(kq.department) <> ''
+        ORDER BY department ASC
+    ");
+    if (!$departmentStmt) throw new Exception("Database error: " . $conn->error, 500);
+    if (!empty($departmentFilterParams)) {
+        $departmentStmt->bind_param($departmentFilterTypes, ...$departmentFilterParams);
+    }
+    $departmentStmt->execute();
+    $departmentOptions = array_values(array_filter(array_map(
+        static fn($row) => $row['department'] ?? null,
+        $departmentStmt->get_result()->fetch_all(MYSQLI_ASSOC)
+    )));
+    $departmentStmt->close();
+
     // Count
     $countStmt = $conn->prepare("SELECT COUNT(*) AS total " . $baseQuery);
     if (!$countStmt) throw new Exception("Database error: " . $conn->error, 500);
@@ -114,6 +180,7 @@ try {
             kq.id,
             kq.department,
             kq.question_text,
+            kq.weight_percent,
             kq.sort_order,
             kq.is_active,
             kq.created_at,
@@ -171,6 +238,9 @@ try {
             "total_pages" => (int) ceil($total / $limit),
             "sortBy"      => $sortBy,
             "sortOrder"   => $sortOrder,
+            "filter_options" => [
+                "departments" => $departmentOptions,
+            ],
             "filters"     => [
                 "section_id"    => $sectionId,
                 "cycle_id"      => $cycleId,

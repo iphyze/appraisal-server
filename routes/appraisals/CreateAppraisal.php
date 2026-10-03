@@ -66,8 +66,8 @@ try {
         }
     }
 
-    if (!in_array($loggedInRoleKey, ['admin', 'supervisor'], true)) {
-        throw new Exception('Super administrators may view appraisals, but only the assigned supervisor can start one.', 403);
+    if (!userCanConductAppraisals($userData)) {
+        throw new Exception('Unauthorized: Only a user configured as a supervisor can start an appraisal.', 403);
     }
 
     $assignment = apFetchOne($conn, "
@@ -150,7 +150,7 @@ try {
         if ($supervisorId && $supervisorId !== $staffUserId) {
             createNotification($conn, $companyId, $supervisorId, 'appraisal_submitted', 'Appraisal submitted', "An appraisal for {$staffFullname} has been submitted for the {$cycle['year']} cycle.", '/appraisals/view/' . $appraisalId);
         }
-        createNotificationsForCompanyRoles($conn, $companyId, ['admin', 'super_admin'], 'appraisal_submitted_admin', 'New appraisal submitted', "{$staffFullname}'s {$cycle['year']} appraisal has been submitted.", '/appraisals/view/' . $appraisalId, [$staffUserId, $supervisorId]);
+        createNotificationsForCompanyRoles($conn, $companyId, ['admin', 'super_admin'], 'appraisal_submitted_admin', 'New appraisal submitted', "{$staffFullname}'s {$cycle['year']} appraisal has been submitted.", '/appraisals/view/' . $appraisalId, [$staffUserId, $supervisorId], $staffUserId, $supervisorId);
 
         $conn->commit();
     } catch (Throwable $e) {

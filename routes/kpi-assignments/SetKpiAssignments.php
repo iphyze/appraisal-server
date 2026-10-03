@@ -29,6 +29,7 @@ try {
     $staffUserId = (int) $data['staff_user_id'];
     $sectionId   = (int) $data['section_id'];
     $questionIds = $data['question_ids'];
+    $questionWeightsInput = $data['question_weights'] ?? null;
 
     if (!is_array($questionIds)) {
         throw new Exception("'question_ids' must be an array. Pass an empty array [] to clear all assignments and revert to departmental default.", 400);
@@ -39,6 +40,33 @@ try {
         array_map('intval', $questionIds),
         fn($id) => $id > 0
     )));
+
+    $questionWeights = [];
+    if ($questionWeightsInput !== null) {
+        if (!is_array($questionWeightsInput)) {
+            throw new Exception("'question_weights' must be an object keyed by question ID when provided.", 400);
+        }
+
+        foreach ($questionIds as $questionId) {
+            $rawWeight = $questionWeightsInput[(string)$questionId] ?? $questionWeightsInput[$questionId] ?? null;
+            if ($rawWeight === null || $rawWeight === '') {
+                throw new Exception("Every selected KPI question needs a weight when custom assignment weights are provided.", 400);
+            }
+            if (!is_numeric($rawWeight)) {
+                throw new Exception("KPI question weight must be numeric.", 400);
+            }
+            $weight = round((float)$rawWeight, 2);
+            if ($weight <= 0 || $weight > 100) {
+                throw new Exception("Each KPI question weight must be greater than 0 and no more than 100.", 400);
+            }
+            $questionWeights[$questionId] = $weight;
+        }
+
+        $weightTotal = round(array_sum($questionWeights), 2);
+        if (abs($weightTotal - 100.0) > 0.01) {
+            throw new Exception("Custom KPI assignment weights must total exactly 100%. Current total: {$weightTotal}%.", 400);
+        }
+    }
 
     // Validate staff exists and belongs to same company
     $staffStmt = $conn->prepare("
@@ -164,12 +192,13 @@ try {
 
         // Insert new selection
         $insertStmt = $conn->prepare("
-            INSERT INTO staff_kpi_assignments (section_id, staff_user_id, kpi_question_id, assigned_by)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO staff_kpi_assignments (section_id, staff_user_id, kpi_question_id, weight_percent, assigned_by)
+            VALUES (?, ?, ?, ?, ?)
         ");
 
         foreach ($validIds as $qId) {
-            $insertStmt->bind_param("iiii", $sectionId, $staffUserId, $qId, $loggedInUserId);
+            $assignmentWeight = $questionWeights[$qId] ?? null;
+            $insertStmt->bind_param("iiidi", $sectionId, $staffUserId, $qId, $assignmentWeight, $loggedInUserId);
             $insertStmt->execute();
         }
         $insertStmt->close();
@@ -203,6 +232,9 @@ try {
             SELECT
                 kq.id,
                 kq.question_text,
+                COALESCE(ska.weight_percent, kq.weight_percent) AS weight_percent,
+                ska.weight_percent AS assignment_weight_percent,
+                kq.weight_percent AS configured_weight_percent,
                 kq.sort_order,
                 kq.department,
                 CASE
@@ -233,6 +265,7 @@ try {
                 "section_id"   => $sectionId,
                 "is_custom"    => true,
                 "source"       => "custom_selection",
+                "has_custom_weights" => !empty($questionWeights),
                 "questions"    => $assignedQuestions,
                 "count"        => count($assignedQuestions),
             ]

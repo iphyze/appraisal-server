@@ -45,7 +45,7 @@ try {
     $supStmt = $conn->prepare("
         SELECT u.id, u.company_id, u.first_name, u.last_name, r.name AS role
         FROM users u INNER JOIN roles r ON r.id = u.role_id
-        WHERE u.id = ? AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor') LIMIT 1
+        WHERE u.id = ? AND " . appraiserRoleWhere('r', 'u') . " LIMIT 1
     ");
     $supStmt->bind_param("i", $supervisorId);
     $supStmt->execute();

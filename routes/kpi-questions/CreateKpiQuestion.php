@@ -32,6 +32,12 @@ try {
     $department   = trim($data['department']);
     $questionText = trim($data['question_text']);
     $sortOrder    = isset($data['sort_order']) ? (int) $data['sort_order'] : 0;
+    $weightPercent = null;
+    if (array_key_exists('weight_percent', $data) && $data['weight_percent'] !== null && $data['weight_percent'] !== '') {
+        if (!is_numeric($data['weight_percent'])) throw new Exception("Weight must be a number.", 400);
+        $weightPercent = round((float) $data['weight_percent'], 2);
+        if ($weightPercent <= 0 || $weightPercent > 100) throw new Exception("Weight must be greater than 0 and no more than 100.", 400);
+    }
     $isActive     = isset($data['is_active'])  ? (int) $data['is_active']  : 1;
 
     // Optional scope fields
@@ -116,9 +122,15 @@ try {
 
     // ── Validate supervisor belongs to same company if provided ───────────────
     if ($supervisorId && $loggedInUserRole !== 'supervisor') {
+        $appraiserWhere = appraiserRoleWhere('r', 'u');
         $supStmt = $conn->prepare("
-            SELECT id FROM users
-            WHERE id = ? AND company_id = ? AND role_id = 3
+            SELECT u.id
+            FROM users u
+            INNER JOIN roles r ON r.id = u.role_id
+            WHERE u.id = ?
+              AND u.company_id = ?
+              AND u.is_active = 1
+              AND {$appraiserWhere}
             LIMIT 1
         ");
         $supStmt->bind_param("ii", $supervisorId, $companyId);
@@ -146,16 +158,16 @@ try {
     $insertStmt = $conn->prepare("
         INSERT INTO kpi_questions
           (company_id, section_id, department, supervisor_id, staff_user_id,
-           question_text, sort_order, is_active, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           question_text, weight_percent, sort_order, is_active, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
     if (!$insertStmt) throw new Exception("Database error: " . $conn->error, 500);
 
     $insertStmt->bind_param(
-        "iisiisiii",
+        "iisiisdiii",
         $companyId, $sectionId, $department,
         $supervisorId, $staffUserId,
-        $questionText, $sortOrder, $isActive, $loggedInUserId
+        $questionText, $weightPercent, $sortOrder, $isActive, $loggedInUserId
     );
     if (!$insertStmt->execute()) {
         throw new Exception("Failed to create KPI question: " . $insertStmt->error, 500);

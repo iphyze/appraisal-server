@@ -64,7 +64,7 @@ try {
 
     $page  = isset($_GET['page']) ? max((int) $_GET['page'], 1) : 1;
     $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : 10;
-    $limit = in_array($limit, [10, 20, 50, 100], true) ? $limit : 10;
+    $limit = in_array($limit, [10, 20, 50, 100, 500], true) ? $limit : 10;
     $offset = ($page - 1) * $limit;
 
     $allowedSort = [
@@ -99,7 +99,7 @@ try {
         $scopeCompanyId = (int) $cycle['company_id'];
     }
 
-    $where = [appraiserRoleWhere('r')];
+    $where = [appraiserRoleWhere('r', 'u')];
 
     if ($scopeCompanyId > 0) $where[] = "u.company_id = {$scopeCompanyId}";
     if ($isActive !== null) $where[] = "u.is_active = {$isActive}";
@@ -121,15 +121,21 @@ try {
 
     $cycleJoinFilter = $cycleId > 0 ? "AND sa.cycle_id = {$cycleId}" : '';
     $appraisalJoinFilter = $cycleId > 0 ? "AND a.cycle_id = {$cycleId}" : '';
-    $onboardJoinFilter = $cycleId > 0 ? "AND onboard.cycle_id = {$cycleId}" : '';
+    $onboardWhere = $cycleId > 0 ? "WHERE cycle_id = {$cycleId}" : '';
 
     $baseFrom = "
         FROM users u
         INNER JOIN roles r ON r.id = u.role_id
         LEFT JOIN companies c ON c.id = u.company_id
-        LEFT JOIN supervisor_onboarding onboard
-            ON onboard.supervisor_id = u.id
-            {$onboardJoinFilter}
+        LEFT JOIN (
+            SELECT
+                supervisor_id,
+                MAX(id) AS id,
+                MAX(onboarded_at) AS onboarded_at
+            FROM supervisor_onboarding
+            {$onboardWhere}
+            GROUP BY supervisor_id
+        ) onboard ON onboard.supervisor_id = u.id
         LEFT JOIN (
             SELECT supervisor_id, COUNT(*) AS assigned_count
             FROM supervisor_assignments sa
@@ -152,6 +158,28 @@ try {
 
     $whereSql = implode(' AND ', $where);
 
+    // Department filter choices are intentionally resolved from the complete
+    // scoped supervisor dataset rather than from the current paginated page.
+    // This keeps searchable selects complete regardless of the selected row limit.
+    $departmentWhere = [appraiserRoleWhere('r', 'u')];
+    if ($scopeCompanyId > 0) $departmentWhere[] = "u.company_id = {$scopeCompanyId}";
+    if ($isActive !== null) $departmentWhere[] = "u.is_active = {$isActive}";
+    $departmentWhere[] = "u.department IS NOT NULL";
+    $departmentWhere[] = "TRIM(u.department) <> ''";
+    $departmentWhereSql = implode(' AND ', $departmentWhere);
+
+    $departmentRows = fetchAllRaw($conn, "
+        SELECT DISTINCT TRIM(u.department) AS department
+        FROM users u
+        INNER JOIN roles r ON r.id = u.role_id
+        WHERE {$departmentWhereSql}
+        ORDER BY department ASC
+    ");
+    $departmentOptions = array_values(array_filter(array_map(
+        static fn($row) => $row['department'] ?? null,
+        $departmentRows
+    )));
+
     $countRow = fetchOneRaw($conn, "
         SELECT COUNT(*) AS total
         {$baseFrom}
@@ -173,6 +201,7 @@ try {
             c.name AS company_name,
             u.role_id,
             r.name AS role_name,
+            u.is_supervisor,
             u.staff_id,
             u.first_name,
             u.last_name,
@@ -235,6 +264,9 @@ try {
             'year' => $cycle['year'],
             'is_active' => (int) $cycle['is_active'],
         ] : null,
+        'filter_options'    => [
+            'departments' => $departmentOptions,
+        ],
     ];
 
     jsonResponse('Success', 'Supervisors fetched successfully.', $rows, $meta);

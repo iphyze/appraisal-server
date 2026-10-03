@@ -27,7 +27,7 @@ try {
         if ($adminScope !== 'All') $staffScopeFilter = $adminScope;
     }
 
-    $conditions = [appraiserRoleWhere('r'), "u.is_active = 1"];
+    $conditions = [appraiserRoleWhere('r', 'u'), "u.is_active = 1"];
     $params     = [];
     $types      = "";
 
@@ -51,6 +51,7 @@ try {
         SELECT
             u.id,
             r.name AS role_name,
+            u.is_supervisor,
             u.first_name,
             u.last_name,
             u.fullname,

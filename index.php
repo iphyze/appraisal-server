@@ -159,6 +159,7 @@ $routes = [
     '/users/my-profile'     => 'routes/users/GetMyProfile.php',
     '/users/reset-password' => 'routes/users/ResetPassword.php',
     '/users/delete'         => 'routes/users/deleteUsers.php',
+    '/users/admin-appraisal-visibility' => 'routes/users/AdminAppraisalVisibility.php',
 
     // Companies (super_admin only)
     '/companies/list'   => 'routes/companies/GetCompanies.php',
@@ -191,6 +192,7 @@ $routes = [
     '/general-questions/bulk-update' => 'routes/general-questions/BulkUpdateGeneralQuestions.php',
     '/kpi-questions/bulk-create'     => 'routes/kpi-questions/BulkCreateKpiQuestions.php',
     '/kpi-questions/bulk-update'     => 'routes/kpi-questions/BulkUpdateKpiQuestions.php',
+    '/kpi-questions/set-weights'      => 'routes/kpi-questions/SetKpiQuestionWeights.php',
 
 
     // Sections
@@ -202,6 +204,8 @@ $routes = [
     '/sections/delete' => 'routes/sections/DeleteSections.php',
 
     // KPI Questions
+    '/kpi-questions/groups' => 'routes/kpi-questions/GetKpiQuestionGroups.php',
+    '/kpi-questions/group'  => 'routes/kpi-questions/GetKpiQuestionGroup.php',
     '/kpi-questions/list'   => 'routes/kpi-questions/GetKpiQuestions.php',
     '/kpi-questions/search' => 'routes/kpi-questions/SearchKpiQuestions.php',
     '/kpi-questions/single' => 'routes/kpi-questions/GetSingleKpiQuestion.php',
@@ -216,6 +220,8 @@ $routes = [
 
 
     // General Questions
+    '/general-questions/groups' => 'routes/general-questions/GetGeneralQuestionGroups.php',
+    '/general-questions/group'  => 'routes/general-questions/GetGeneralQuestionGroup.php',
     '/general-questions/list'   => 'routes/general-questions/GetGeneralQuestions.php',
     '/general-questions/search' => 'routes/general-questions/SearchGeneralQuestions.php',
     '/general-questions/single' => 'routes/general-questions/GetSingleGeneralQuestion.php',
@@ -228,6 +234,7 @@ $routes = [
     '/supervisors/single'       => 'routes/supervisors/GetSingleSupervisor.php',
     '/supervisors/search'       => 'routes/supervisors/SearchSupervisors.php',
     '/supervisors/onboard'      => 'routes/supervisors/Onboard.php',
+    '/supervisors/reset-onboarding' => 'routes/supervisors/ResetOnboarding.php',
     '/supervisors/subordinates' => 'routes/supervisors/GetSubordinates.php',
     '/supervisors/assign'       => 'routes/supervisors/AssignSubordinates.php',
     '/supervisors/unassign'     => 'routes/supervisors/UnassignSubordinates.php',
@@ -258,6 +265,7 @@ $routes = [
 
     // Notifications
     '/notifications/list' => 'routes/notifications/ListNotifications.php',
+    '/notifications/pulse' => 'routes/notifications/NotificationPulse.php',
     '/notifications/read' => 'routes/notifications/MarkNotificationsRead.php',
 
     // Search

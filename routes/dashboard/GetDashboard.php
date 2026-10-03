@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 
 header('Content-Type: application/json');
 
@@ -83,7 +84,7 @@ try {
             $supCountStmt = $conn->prepare("
                 SELECT COUNT(*) AS cnt FROM users u
                 INNER JOIN roles r ON r.id = u.role_id
-                WHERE u.company_id = ? AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor') AND u.is_active = 1
+                WHERE u.company_id = ? AND " . appraiserRoleWhere('r', 'u') . " AND u.is_active = 1
             ");
             $supCountStmt->bind_param("i", $cId);
             $supCountStmt->execute();
@@ -174,10 +175,11 @@ try {
 
         // An administrator may also be an assigned appraiser. This status powers
         // the onboarding prompt without taking away their administration workspace.
+        $appraiserEnabled = userCanConductAppraisals($userData);
         $appraiserAssignmentCount = 0;
         $appraiserIsOnboarded = false;
         $appraiserOnboardedAt = null;
-        if ($cycle) {
+        if ($cycle && $appraiserEnabled) {
             $adminAssignmentStmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM supervisor_assignments WHERE supervisor_id = ? AND cycle_id = ?");
             $adminAssignmentStmt->bind_param("ii", $loggedInUserId, $cycle['id']);
             $adminAssignmentStmt->execute();
@@ -211,6 +213,21 @@ try {
             $typeTypes   .= "s";
         }
 
+        // Keep every administrative dashboard aggregate aligned with the same
+        // admin-to-admin appraisal visibility applied by the appraisal list/view APIs.
+        $appraisalVisibilityFilter = ' AND ' . adminAppraisalVisibilityWhereSql(
+            $loggedInUserId,
+            $loggedInCompanyId,
+            'ap'
+        );
+        $appraiseeVisibilityFilter = adminAppraiseeVisibilityWhereSql(
+            $loggedInUserId,
+            $loggedInCompanyId,
+            'u',
+            'r',
+            $cycle ? (int) $cycle['id'] : 0
+        );
+
         // Overall appraisal stats
         $params = [$loggedInCompanyId];
         $types  = "i";
@@ -230,7 +247,7 @@ try {
                 ROUND(AVG(ap.appraisal_summary), 2)                    AS avg_score,
                 ROUND(AVG(ap.kpi_rating), 2)                           AS avg_kpi
             FROM appraisals ap
-            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter}
+            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter} {$appraisalVisibilityFilter}
         ");
         $aprStmt->bind_param($types . $typeTypes, ...array_merge($params, $typeParams));
         $aprStmt->execute();
@@ -242,7 +259,11 @@ try {
         $totalStmtQ     = $conn->prepare("
             SELECT COUNT(*) AS cnt FROM users u
             INNER JOIN roles r ON r.id = u.role_id
-            WHERE u.company_id = ? AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) <> 'super_admin' AND u.is_active = 1 {$staffCondition}
+            WHERE u.company_id = ?
+              AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) <> 'super_admin'
+              AND u.is_active = 1
+              AND {$appraiseeVisibilityFilter}
+              {$staffCondition}
         ");
         $totalStmtQ->bind_param("i", $loggedInCompanyId);
         $totalStmtQ->execute();
@@ -256,7 +277,7 @@ try {
                 COUNT(*)            AS appraised,
                 ROUND(AVG(ap.appraisal_summary), 2) AS avg_score
             FROM appraisals ap
-            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter}
+            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter} {$appraisalVisibilityFilter}
             GROUP BY ap.staff_department
             ORDER BY avg_score DESC
         ");
@@ -269,7 +290,7 @@ try {
         $distStmt = $conn->prepare("
             SELECT evaluation_statement, COUNT(*) AS cnt
             FROM appraisals ap
-            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter}
+            WHERE ap.company_id = ? {$cycleFilter} {$typeFilter} {$appraisalVisibilityFilter}
             GROUP BY evaluation_statement
             ORDER BY cnt DESC
         ");
@@ -278,21 +299,27 @@ try {
         $scoreDistribution = $distStmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $distStmt->close();
 
-        // Supervisor progress
+        // Supervisor progress also excludes hidden peer-Admin appraisal subjects so
+        // aggregate counts cannot reveal records the current Admin cannot open.
+        $assignedAdminVisibility = adminAppraiseeVisibilityWhereSql($loggedInUserId, $loggedInCompanyId, 'assigned_user', 'assigned_role', $cycle ? (int) $cycle['id'] : 0);
         $supProgressStmt = $conn->prepare("
             SELECT
                 u.id,
                 CONCAT(u.first_name,' ',u.last_name) AS supervisor_name,
                 u.department,
-                COUNT(DISTINCT sa.staff_id)           AS total_assigned,
+                COUNT(DISTINCT CASE WHEN {$assignedAdminVisibility} THEN sa.staff_id END) AS total_assigned,
                 COUNT(DISTINCT ap.staff_user_id)      AS appraised_count
             FROM users u
             INNER JOIN roles r ON r.id = u.role_id
             LEFT JOIN supervisor_assignments sa ON sa.supervisor_id = u.id
                 AND sa.cycle_id = ?
+            LEFT JOIN users assigned_user ON assigned_user.id = sa.staff_id
+            LEFT JOIN roles assigned_role ON assigned_role.id = assigned_user.role_id
             LEFT JOIN appraisals ap ON ap.supervisor_id = u.id
                 AND ap.cycle_id = ?
-            WHERE u.company_id = ? AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor')
+                {$appraisalVisibilityFilter}
+            WHERE u.company_id = ? AND " . appraiserRoleWhere('r', 'u') . "
+              AND u.is_active = 1
             GROUP BY u.id
             ORDER BY appraised_count DESC
         ");
@@ -354,6 +381,7 @@ try {
                 "role"        => "admin",
                 "staff_scope" => $adminScope,
                 "cycle"       => $cycle,
+                "can_conduct_appraisals" => $appraiserEnabled ? 1 : 0,
                 "appraiser_assignment_count" => $appraiserAssignmentCount,
                 "appraiser_is_onboarded" => $appraiserIsOnboarded,
                 "appraiser_onboarded_at" => $appraiserOnboardedAt,

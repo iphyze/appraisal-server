@@ -85,6 +85,9 @@ try {
             SELECT
                 kq.id,
                 kq.question_text,
+                COALESCE(ska.weight_percent, kq.weight_percent) AS weight_percent,
+                ska.weight_percent AS assignment_weight_percent,
+                kq.weight_percent AS configured_weight_percent,
                 kq.sort_order,
                 kq.department,
                 kq.supervisor_id,
@@ -112,6 +115,9 @@ try {
             SELECT
                 kq.id,
                 kq.question_text,
+                kq.weight_percent AS weight_percent,
+                NULL AS assignment_weight_percent,
+                kq.weight_percent AS configured_weight_percent,
                 kq.sort_order,
                 kq.department,
                 kq.supervisor_id,
@@ -148,6 +154,7 @@ try {
             "section_id"  => $sectionId,
             "is_custom"   => $isCustom,
             "source"      => $isCustom ? "custom_selection" : "departmental_default",
+            "has_weights" => count(array_filter($questions, fn($question) => $question['weight_percent'] !== null && $question['weight_percent'] !== '')) > 0,
             "questions"   => $questions,
             "count"       => count($questions),
         ]

@@ -113,7 +113,7 @@ function fetchMailRecipients($conn, array $userData, string $audience, int $cycl
             "sup.company_id = {$cycleCompanyId}",
             'sup.is_active = 1',
             mailDeliverableWhere('sup.email'),
-            "LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor')",
+            appraiserRoleWhere('r', 'sup'),
         ];
 
         if ($safeSearch !== '') {
@@ -147,7 +147,7 @@ function fetchMailRecipients($conn, array $userData, string $audience, int $cycl
             "sup.company_id = {$cycleCompanyId}",
             'sup.is_active = 1',
             mailDeliverableWhere('sup.email'),
-            "LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor')",
+            appraiserRoleWhere('r', 'sup'),
         ];
 
         if ($safeSearch !== '') {

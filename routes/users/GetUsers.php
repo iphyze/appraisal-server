@@ -153,6 +153,7 @@ try {
             u.job_title,
             u.staff_type,
             u.staff_scope,
+            u.is_supervisor,
             u.location,
             u.unique_ref,
             u.date_of_joining,

@@ -91,8 +91,8 @@ try {
         throw new Exception('Unauthorized: This appraisal does not belong to your company.', 403);
     }
 
-    if (!in_array($loggedInRoleKey, ['admin', 'supervisor'], true)) {
-        throw new Exception('Super administrators may view appraisals, but only the assigned supervisor can start or edit one.', 403);
+    if (!userCanConductAppraisals($userData)) {
+        throw new Exception('Unauthorized: Only a user configured as a supervisor can start or edit an appraisal.', 403);
     }
 
     $assignment = fetchOneRaw($conn, "
@@ -136,14 +136,20 @@ try {
         $genRatings = fetchAllRaw($conn, "SELECT general_question_id, rating FROM appraisal_section_responses WHERE appraisal_id = {$appraisalId}");
         foreach ($genRatings as $row) $existingGeneralRatings[(int)$row['general_question_id']] = $row['rating'];
 
-        $kpiRatings = fetchAllRaw($conn, "SELECT kpi_question_id, rating FROM appraisal_kpi_responses WHERE appraisal_id = {$appraisalId}");
-        foreach ($kpiRatings as $row) $existingKpiRatings[(int)$row['kpi_question_id']] = $row['rating'];
+        $kpiRatings = fetchAllRaw($conn, "SELECT kpi_question_id, rating, question_weight FROM appraisal_kpi_responses WHERE appraisal_id = {$appraisalId}");
+        foreach ($kpiRatings as $row) {
+            $existingKpiRatings[(int)$row['kpi_question_id']] = [
+                'rating' => $row['rating'],
+                'question_weight' => $row['question_weight'],
+            ];
+        }
 
-        $scoreModes = fetchAllRaw($conn, "SELECT section_id, rating_mode, overall_rating, section_avg FROM appraisal_section_scores WHERE appraisal_id = {$appraisalId}");
+        $scoreModes = fetchAllRaw($conn, "SELECT section_id, rating_mode, overall_rating, section_avg, question_weighting_mode FROM appraisal_section_scores WHERE appraisal_id = {$appraisalId}");
         foreach ($scoreModes as $score) {
             $existingSectionRating[(int)$score['section_id']] = [
                 'rating_mode' => ($score['rating_mode'] ?? 'per_question') === 'overall' ? 'overall' : 'per_question',
                 'overall_rating' => ($score['rating_mode'] ?? '') === 'overall' ? ($score['overall_rating'] ?? $score['section_avg']) : '',
+                'question_weighting_mode' => ($score['question_weighting_mode'] ?? 'equal') === 'custom' ? 'custom' : 'equal',
             ];
         }
     }
@@ -188,7 +194,7 @@ try {
                 // During edit, load the exact KPI questions that were used for this staff appraisal.
                 // This prevents removed default KPI questions from reappearing when the supervisor edits the appraisal later.
                 $questionRows = fetchAllRaw($conn, "
-                    SELECT r.kpi_question_id AS id, r.question_text, q.department, q.supervisor_id, q.staff_user_id, q.sort_order, r.rating,
+                    SELECT r.kpi_question_id AS id, r.question_text, q.department, q.supervisor_id, q.staff_user_id, q.sort_order, r.rating, r.question_weight,
                            CASE
                                WHEN q.staff_user_id = {$staffUserId} THEN 'individual'
                                WHEN q.supervisor_id = {$supervisorId} THEN 'supervisor'
@@ -203,6 +209,7 @@ try {
             } else {
                 $questionRows = fetchAllRaw($conn, "
                     SELECT DISTINCT q.id, q.question_text, q.department, q.supervisor_id, q.staff_user_id, q.sort_order, NULL AS rating,
+                           COALESCE(ska.weight_percent, q.weight_percent) AS question_weight,
                            CASE
                                WHEN q.staff_user_id = {$staffUserId} THEN 'individual'
                                WHEN q.supervisor_id = {$supervisorId} THEN 'supervisor'
@@ -235,18 +242,46 @@ try {
                     'question_text' => $q['question_text'],
                     'sort_order' => (int)($q['sort_order'] ?? 0),
                     'scope' => $q['scope'],
-                    'rating' => $q['rating'] ?? ($existingKpiRatings[$qid] ?? ''),
+                    'rating' => $q['rating'] ?? ($existingKpiRatings[$qid]['rating'] ?? ''),
+                    'question_weight' => $q['question_weight'] ?? ($existingKpiRatings[$qid]['question_weight'] ?? null),
+                    'suggested_weight' => $q['question_weight'] ?? null,
                 ];
             }
         }
 
-        // New appraisals open in cumulative (overall section) mode by default.
-        // When editing an existing appraisal, retain the mode already saved.
-        $defaultRatingMode = $existing ? 'per_question' : 'overall';
-        $savedMode = $existingSectionRating[$sectionId] ?? ['rating_mode' => $defaultRatingMode, 'overall_rating' => ''];
+        // A new KPI section with a complete Admin-configured 100% weight set
+        // should open ready for per-question/custom weighting. All other new
+        // sections keep the cumulative default. Existing appraisals retain the
+        // exact mode that was saved with the appraisal snapshot.
+        $hasCompleteConfiguredKpiWeights = false;
+        if (!$existing && ($section['type'] ?? '') === 'kpi' && count($questions) > 0) {
+            $configuredWeightTotal = 0.0;
+            $configuredWeightCount = 0;
+            foreach ($questions as $question) {
+                $weight = isset($question['question_weight']) && $question['question_weight'] !== ''
+                    ? (float)$question['question_weight']
+                    : 0.0;
+                if ($weight > 0 && $weight <= 100) {
+                    $configuredWeightCount++;
+                    $configuredWeightTotal += $weight;
+                }
+            }
+            $hasCompleteConfiguredKpiWeights = $configuredWeightCount === count($questions)
+                && abs($configuredWeightTotal - 100.0) <= 0.01;
+        }
+
+        $defaultRatingMode = $existing
+            ? 'per_question'
+            : ($hasCompleteConfiguredKpiWeights ? 'per_question' : 'overall');
+        $savedMode = $existingSectionRating[$sectionId] ?? [
+            'rating_mode' => $defaultRatingMode,
+            'overall_rating' => '',
+            'question_weighting_mode' => $hasCompleteConfiguredKpiWeights ? 'custom' : 'equal',
+        ];
         $formSections[] = array_merge($section, [
             'rating_mode' => $savedMode['rating_mode'],
             'overall_rating' => $savedMode['overall_rating'],
+            'question_weighting_mode' => $section['type'] === 'kpi' ? ($savedMode['question_weighting_mode'] ?? 'equal') : 'equal',
             'questions' => $questions,
         ]);
     }

@@ -23,8 +23,8 @@ try {
      */
     if ($loggedInRole === 'supervisor') {
         $supervisorId = $loggedInUserId;
-    } elseif ($loggedInRole === 'admin' && (!isset($_GET['supervisor_id']) || !is_numeric($_GET['supervisor_id']))) {
-        // Administrators can also act as appraisers; without an explicit target load their own assignments.
+    } elseif ($loggedInRole === 'admin' && userCanConductAppraisals($userData) && (!isset($_GET['supervisor_id']) || !is_numeric($_GET['supervisor_id']))) {
+        // Only administrators explicitly marked as supervisors may load their own assignments.
         $supervisorId = $loggedInUserId;
     } elseif (in_array($loggedInRole, ['super_admin', 'admin'], true)) {
         if (!isset($_GET['supervisor_id']) || !is_numeric($_GET['supervisor_id'])) {
@@ -37,9 +37,9 @@ try {
 
     // Validate supervisor
     $supStmt = $conn->prepare("
-        SELECT u.id, u.company_id, u.first_name, u.last_name, r.name AS role
+        SELECT u.id, u.company_id, u.first_name, u.last_name, u.is_supervisor, r.name AS role
         FROM users u INNER JOIN roles r ON r.id = u.role_id
-        WHERE u.id = ? AND LOWER(REPLACE(TRIM(r.name), ' ', '_')) IN ('admin', 'supervisor') LIMIT 1
+        WHERE u.id = ? AND " . appraiserRoleWhere('r', 'u') . " LIMIT 1
     ");
     $supStmt->bind_param("i", $supervisorId);
     $supStmt->execute();

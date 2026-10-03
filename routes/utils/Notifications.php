@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/../../includes/AdminAppraisalVisibility.php';
+
 function ensureNotificationsTable(mysqli $conn): void
 {
     $createSql = "
@@ -89,7 +91,9 @@ function createNotificationsForCompanyRoles(
     string $title,
     string $message = '',
     string $linkUrl = '',
-    array $excludeUserIds = []
+    array $excludeUserIds = [],
+    int $appraisalSubjectUserId = 0,
+    int $appraisalSupervisorId = 0
 ): bool {
     ensureNotificationsTable($conn);
 
@@ -124,7 +128,7 @@ function createNotificationsForCompanyRoles(
     }
 
     $stmt = $conn->prepare("
-        SELECT u.id
+        SELECT u.id, r.name AS role_name
         FROM users u
         INNER JOIN roles r ON r.id = u.role_id
         WHERE u.company_id = ?
@@ -147,15 +151,37 @@ function createNotificationsForCompanyRoles(
     }
 
     $result = $stmt->get_result();
-    $recipientIds = [];
+    $recipients = [];
 
     while ($row = $result->fetch_assoc()) {
-        $recipientIds[] = (int) $row['id'];
+        $recipients[] = [
+            'id' => (int) $row['id'],
+            'role_key' => aavRoleKey($row['role_name'] ?? ''),
+        ];
     }
 
     $stmt->close();
 
-    foreach ($recipientIds as $recipientId) {
+    foreach ($recipients as $recipient) {
+        $recipientId = (int) $recipient['id'];
+
+        // When the appraisee is another Admin, do not create a notification that
+        // exposes the appraisal to an Admin who cannot open that record. Super
+        // Admins and normal staff appraisal notifications remain unchanged.
+        if (
+            $appraisalSubjectUserId > 0
+            && $recipient['role_key'] === 'admin'
+            && !adminCanViewAppraisalSubject(
+                $conn,
+                $recipientId,
+                $companyId,
+                $appraisalSubjectUserId,
+                $appraisalSupervisorId
+            )
+        ) {
+            continue;
+        }
+
         createNotification(
             $conn,
             $companyId,

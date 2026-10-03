@@ -66,6 +66,7 @@ try {
             c.name AS company_name,
             u.role_id,
             r.name AS role_name,
+            u.is_supervisor,
             u.staff_id,
             u.first_name,
             u.last_name,
@@ -88,7 +89,7 @@ try {
         INNER JOIN roles r ON r.id = u.role_id
         LEFT JOIN companies c ON c.id = u.company_id
         WHERE u.id = {$id}
-          AND " . appraiserRoleWhere('r') . "
+          AND " . appraiserRoleWhere('r', 'u') . "
           {$companySql}
         LIMIT 1
     ");
@@ -112,7 +113,7 @@ try {
 
     $cycleFilter = $cycleId > 0 ? "AND sa.cycle_id = {$cycleId}" : '';
     $appraisalFilter = $cycleId > 0 ? "AND a.cycle_id = {$cycleId}" : '';
-    $onboardFilter = $cycleId > 0 ? "AND onboard.cycle_id = {$cycleId}" : '';
+    $onboardWhere = $cycleId > 0 ? "AND cycle_id = {$cycleId}" : '';
 
     $subordinates = fetchAllRaw($conn, "
         SELECT
@@ -171,9 +172,16 @@ try {
               {$appraisalFilter}
             GROUP BY staff_user_id
         ) appr ON appr.staff_user_id = sa.staff_id
-        LEFT JOIN supervisor_onboarding onboard
-            ON onboard.supervisor_id = {$id}
-            {$onboardFilter}
+        LEFT JOIN (
+            SELECT
+                supervisor_id,
+                MAX(id) AS id,
+                MAX(onboarded_at) AS onboarded_at
+            FROM supervisor_onboarding
+            WHERE supervisor_id = {$id}
+              {$onboardWhere}
+            GROUP BY supervisor_id
+        ) onboard ON onboard.supervisor_id = {$id}
         WHERE sa.supervisor_id = {$id}
           {$cycleFilter}
     ") ?: [];

@@ -89,6 +89,7 @@ function authenticateUser(): array
             u.email,
             u.username,
             u.staff_scope,
+            u.is_supervisor,
             u.department,
             u.job_title,
             u.staff_type,
@@ -135,6 +136,7 @@ function authenticateUser(): array
     $user['id'] = (int) $user['id'];
     $user['company_id'] = isset($user['company_id']) ? (int) $user['company_id'] : null;
     $user['is_active'] = (int) $user['is_active'];
+    $user['is_supervisor'] = (int) ($user['is_supervisor'] ?? 0);
     $user['must_change_password'] = (int) ($user['must_change_password'] ?? 0);
     $user['token_version'] = $databaseTokenVersion;
     $user['role_key'] = authRoleKey($user['role'] ?? '');
@@ -230,7 +232,8 @@ function buildCompanyWhereClause(?int $companyScope, string $alias = ''): array
  * Performance capability rules.
  * Access roles control portal permissions, while appraisal capability is broader:
  * - staff, supervisor and admin users may be appraised;
- * - admin and supervisor users may conduct appraisals;
+ * - supervisor-role users may conduct appraisals;
+ * - admin users may conduct appraisals only when users.is_supervisor = 1;
  * - super_admin manages the portal but is not an appraisal subject.
  */
 function isAppraiseeRole($role): bool
@@ -247,12 +250,113 @@ function appraiseeRoleWhere(string $roleAlias = 'r'): string
     return "LOWER(REPLACE(TRIM({$roleAlias}.name), ' ', '_')) <> 'super_admin'";
 }
 
-function appraiserRoleWhere(string $roleAlias = 'r'): string
+function userCanConductAppraisals(array $user): bool
 {
-    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $roleAlias)) {
-        throw new InvalidArgumentException('Invalid role alias provided.');
+    $role = authRoleKey($user['role'] ?? $user['role_name'] ?? '');
+
+    if ($role === 'supervisor') {
+        return true;
     }
 
-    return "LOWER(REPLACE(TRIM({$roleAlias}.name), ' ', '_')) IN ('admin', 'supervisor')";
+    return $role === 'admin' && (int) ($user['is_supervisor'] ?? 0) === 1;
+}
+
+function appraiserRoleWhere(string $roleAlias = 'r', string $userAlias = 'u'): string
+{
+    foreach ([$roleAlias, $userAlias] as $alias) {
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $alias)) {
+            throw new InvalidArgumentException('Invalid SQL alias provided.');
+        }
+    }
+
+    $roleKey = "LOWER(REPLACE(TRIM({$roleAlias}.name), ' ', '_'))";
+
+    return "({$roleKey} = 'supervisor' OR ({$roleKey} = 'admin' AND COALESCE({$userAlias}.is_supervisor, 0) = 1))";
+}
+
+/**
+ * Return active-cycle responsibilities that make removing supervisor capability unsafe.
+ * Historical/inactive-cycle records are intentionally ignored so they remain auditable
+ * without permanently locking a user's role/capability.
+ */
+function supervisorCapabilityDependencies(int $userId): array
+{
+    global $conn;
+
+    if ($userId <= 0) {
+        return [
+            'active_assignments' => 0,
+            'active_onboarding_cycles' => 0,
+            'active_appraisals' => 0,
+            'has_active_dependencies' => false,
+        ];
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM supervisor_assignments sa
+                INNER JOIN appraisal_cycles ac ON ac.id = sa.cycle_id
+                WHERE sa.supervisor_id = ? AND ac.is_active = 1
+            ) AS active_assignments,
+            (
+                SELECT COUNT(DISTINCT so.cycle_id)
+                FROM supervisor_onboarding so
+                INNER JOIN appraisal_cycles ac ON ac.id = so.cycle_id
+                WHERE so.supervisor_id = ? AND ac.is_active = 1
+            ) AS active_onboarding_cycles,
+            (
+                SELECT COUNT(*)
+                FROM appraisals ap
+                INNER JOIN appraisal_cycles ac ON ac.id = ap.cycle_id
+                WHERE ap.supervisor_id = ? AND ac.is_active = 1
+            ) AS active_appraisals
+    ");
+
+    if (!$stmt) {
+        throw new Exception('Database error while checking supervisor responsibilities.', 500);
+    }
+
+    $stmt->bind_param('iii', $userId, $userId, $userId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc() ?: [];
+    $stmt->close();
+
+    $dependencies = [
+        'active_assignments' => (int) ($row['active_assignments'] ?? 0),
+        'active_onboarding_cycles' => (int) ($row['active_onboarding_cycles'] ?? 0),
+        'active_appraisals' => (int) ($row['active_appraisals'] ?? 0),
+    ];
+    $dependencies['has_active_dependencies'] =
+        $dependencies['active_assignments'] > 0
+        || $dependencies['active_onboarding_cycles'] > 0
+        || $dependencies['active_appraisals'] > 0;
+
+    return $dependencies;
+}
+
+function supervisorCapabilityDependencyMessage(array $dependencies): string
+{
+    $parts = [];
+
+    $assignments = (int) ($dependencies['active_assignments'] ?? 0);
+    $onboarding = (int) ($dependencies['active_onboarding_cycles'] ?? 0);
+    $appraisals = (int) ($dependencies['active_appraisals'] ?? 0);
+
+    if ($assignments > 0) {
+        $parts[] = $assignments . ' active-cycle staff assignment' . ($assignments === 1 ? '' : 's');
+    }
+    if ($onboarding > 0) {
+        $parts[] = 'onboarding in ' . $onboarding . ' active cycle' . ($onboarding === 1 ? '' : 's');
+    }
+    if ($appraisals > 0) {
+        $parts[] = $appraisals . ' active-cycle appraisal' . ($appraisals === 1 ? '' : 's');
+    }
+
+    $detail = $parts ? implode(', ', $parts) : 'active appraisal responsibilities';
+
+    return 'Supervisor capability cannot be removed while this user still has ' . $detail
+        . '. Resolve the active-cycle responsibilities first (unassign staff where allowed, reset onboarding, or close the active cycle). Historical records will remain intact.';
 }
 

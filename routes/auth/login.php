@@ -126,6 +126,7 @@ function loadMatchingLoginAccounts(mysqli $conn, string $email, int $companyId =
             COALESCE(u.token_version, 0) AS token_version,
             u.username,
             u.staff_scope,
+            u.is_supervisor,
             u.department,
             u.job_title,
             u.staff_type,
@@ -287,6 +288,7 @@ try {
     $user['id'] = (int) $user['id'];
     $user['company_id'] = (int) $user['company_id'];
     $user['must_change_password'] = (int) ($user['must_change_password'] ?? 0);
+    $user['is_supervisor'] = (int) ($user['is_supervisor'] ?? 0);
     $user['csrf_token'] = $csrfToken;
 
     loginResponse('Success', 'Login successful.', $user);

@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 require_once __DIR__ . '/../utils/SimpleXlsx.php';
 
 try {
@@ -32,6 +33,7 @@ try {
         $where[] = 'ap.company_id = ?';
         $types .= 'i';
         $params[] = $companyId;
+        $where[] = adminAppraisalVisibilityWhereSql($userId, $companyId, 'ap');
         $staffScope = trim((string)($userData['staff_scope'] ?? 'All'));
         if (in_array($staffScope, ['Local', 'Expatriate'], true)) {
             // Type scope applies to regular staff only; admin/supervisor appraisees

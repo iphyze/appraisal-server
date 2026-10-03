@@ -73,6 +73,7 @@ try {
             kq.id,
             kq.department,
             kq.question_text,
+            kq.weight_percent,
             kq.sort_order,
             s.id    AS section_id,
             s.code  AS section_code,

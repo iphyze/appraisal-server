@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 
 header('Content-Type: application/json; charset=UTF-8');
 
@@ -51,7 +52,7 @@ try {
     if ($isAdminLike) {
         $whereCompany = $companyScope !== null ? ' AND u.company_id = ?' : '';
         $userSql = "
-            SELECT u.id, u.first_name, u.last_name, u.email, u.department, u.job_title,
+            SELECT u.id, u.first_name, u.last_name, u.email, u.department, u.job_title, u.is_supervisor,
                    r.name AS role_name, c.code AS company_code, c.name AS company_name
             FROM users u
             INNER JOIN roles r ON r.id = u.role_id
@@ -76,7 +77,7 @@ try {
         while ($row = $result->fetch_assoc()) {
             $roleKey = authRoleKey($row['role_name'] ?? 'user');
             $name = trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? ''));
-            $isAppraiser = in_array($roleKey, ['admin', 'supervisor'], true);
+            $isAppraiser = $roleKey === 'supervisor' || ($roleKey === 'admin' && (int) ($row['is_supervisor'] ?? 0) === 1);
             $subtitle = trim(($row['job_title'] ?? ucfirst($roleKey)) . ' • ' . ($row['department'] ?? $row['email'] ?? ''));
             if ($loggedInRole === 'super_admin' && $companyScope === null) {
                 $subtitle .= ' • ' . ($row['company_code'] ?? $row['company_name']);
@@ -94,8 +95,8 @@ try {
         $stmt->close();
     }
 
-    // A supervisor or an administrator can be an assigned appraiser.
-    if (in_array($loggedInRole, ['supervisor', 'admin'], true)) {
+    // Only users with actual supervisor capability can have assigned appraisal staff.
+    if (userCanConductAppraisals($userData)) {
         $staffSql = "
             SELECT DISTINCT u.id, u.first_name, u.last_name, u.department, u.job_title, sa.cycle_id
             FROM supervisor_assignments sa
@@ -121,13 +122,27 @@ try {
         $stmt->close();
     }
 
-    // All appraisees can find their own records; appraisers can also find records they conducted.
+    // All appraisees can find their own records; supervisor-capable users can also find appraisals they conducted.
     if (in_array($loggedInRole, ['staff', 'supervisor', 'admin'], true)) {
-        $appraisalAccess = $loggedInRole === 'staff'
-            ? 'ap.staff_user_id = ?'
-            : '(ap.staff_user_id = ? OR ap.supervisor_id = ?)';
+        $canConductAppraisals = userCanConductAppraisals($userData);
+        $appraisalAccess = $canConductAppraisals
+            ? '(ap.staff_user_id = ? OR ap.supervisor_id = ?)'
+            : 'ap.staff_user_id = ?';
+
+        // Admin Global Search historically exposed only the Admin's own/conducted
+        // appraisals. Add only the explicitly permitted peer-Admin records here;
+        // do not broaden search to all regular staff appraisals.
+        if ($loggedInRole === 'admin') {
+            $adminCompanyId = (int) ($userData['company_id'] ?? 0);
+            $peerAdminGrant = adminOtherAdminAppraisalGrantSql(
+                $loggedInUserId,
+                $adminCompanyId,
+                'ap'
+            );
+            $appraisalAccess = "(({$appraisalAccess}) OR {$peerAdminGrant}) AND ap.company_id = {$adminCompanyId}";
+        }
         $aprSql = "
-            SELECT ap.id, ap.status, ap.appraisal_summary, ac.title, ac.year,
+            SELECT ap.id, ap.staff_user_id, ap.status, ap.appraisal_summary, ac.title, ac.year,
                    CONCAT(st.first_name, ' ', st.last_name) AS staff_name
             FROM appraisals ap
             INNER JOIN appraisal_cycles ac ON ac.id = ap.cycle_id
@@ -141,15 +156,15 @@ try {
         if (!$stmt) {
             throw new Exception('Database error: ' . $conn->error, 500);
         }
-        if ($loggedInRole === 'staff') {
-            $stmt->bind_param('isssss', $loggedInUserId, $like, $like, $like, $like, $like);
-        } else {
+        if ($canConductAppraisals) {
             $stmt->bind_param('iisssss', $loggedInUserId, $loggedInUserId, $like, $like, $like, $like, $like);
+        } else {
+            $stmt->bind_param('isssss', $loggedInUserId, $like, $like, $like, $like, $like);
         }
         $stmt->execute();
         $result = $stmt->get_result();
         while ($row = $result->fetch_assoc()) {
-            $ownRecord = $loggedInRole === 'staff' || trim((string) $row['staff_name']) === trim(($userData['first_name'] ?? '') . ' ' . ($userData['last_name'] ?? ''));
+            $ownRecord = (int) ($row['staff_user_id'] ?? 0) === $loggedInUserId;
             $title = $ownRecord
                 ? ($row['title'] . ' (' . $row['year'] . ')')
                 : ($row['staff_name'] . ' • ' . $row['year']);

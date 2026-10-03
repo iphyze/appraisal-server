@@ -58,7 +58,7 @@ try {
             }
         }
     }
-    $isConductingAppraiser = in_array($loggedInRoleKey, ['admin', 'supervisor'], true)
+    $isConductingAppraiser = userCanConductAppraisals($userData)
         && (int) $appraisal['supervisor_id'] === $loggedInUserId;
 
     if (!$isConductingAppraiser) {
@@ -76,6 +76,18 @@ try {
 
     if (!$activeAssignment) {
         throw new Exception('This employee is no longer assigned to you for the appraisal cycle.', 403);
+    }
+
+    $onboard = apFetchOne($conn, "
+        SELECT id
+        FROM supervisor_onboarding
+        WHERE cycle_id = " . (int) $appraisal['cycle_id'] . "
+          AND supervisor_id = {$loggedInUserId}
+        LIMIT 1
+    ");
+
+    if (!$onboard) {
+        throw new Exception('Complete supervisor onboarding before editing this appraisal.', 403);
     }
 
     if ($isConductingAppraiser && (int) $appraisal['update_count'] >= 2) {
@@ -130,7 +142,7 @@ try {
         if ((int)$appraisal['supervisor_id'] !== (int)$appraisal['staff_user_id']) {
             createNotification($conn, (int)$appraisal['company_id'], (int)$appraisal['supervisor_id'], 'appraisal_updated', 'Appraisal updated', "{$appraisal['staff_fullname']}'s {$appraisal['cycle_year']} appraisal was updated.", '/appraisals/view/' . $appraisalId);
         }
-        createNotificationsForCompanyRoles($conn, (int)$appraisal['company_id'], ['admin', 'super_admin'], 'appraisal_updated_admin', 'Appraisal updated', "{$appraisal['staff_fullname']}'s {$appraisal['cycle_year']} appraisal was updated.", '/appraisals/view/' . $appraisalId, [(int)$appraisal['staff_user_id'], (int)$appraisal['supervisor_id']]);
+        createNotificationsForCompanyRoles($conn, (int)$appraisal['company_id'], ['admin', 'super_admin'], 'appraisal_updated_admin', 'Appraisal updated', "{$appraisal['staff_fullname']}'s {$appraisal['cycle_year']} appraisal was updated.", '/appraisals/view/' . $appraisalId, [(int)$appraisal['staff_user_id'], (int)$appraisal['supervisor_id']], (int)$appraisal['staff_user_id'], (int)$appraisal['supervisor_id']);
         $conn->commit();
     } catch (Throwable $e) {
         $conn->rollback();

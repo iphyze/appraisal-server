@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 
 header('Content-Type: application/json');
 
@@ -25,6 +26,7 @@ try {
     $loggedInRole = $userData['role'] ?? '';
     $loggedInRoleKey = strtolower(str_replace(' ', '_', trim((string)$loggedInRole)));
     $loggedInCompanyId = isset($userData['company_id']) ? (int)$userData['company_id'] : 0;
+    $loggedInCanAppraise = userCanConductAppraisals($userData);
 
     $cycleId = isset($_GET['cycle_id']) ? (int)$_GET['cycle_id'] : 0;
     $supervisorId = isset($_GET['supervisor_id']) ? (int)$_GET['supervisor_id'] : 0;
@@ -69,7 +71,7 @@ try {
             FROM users u
             INNER JOIN roles r ON r.id = u.role_id
             WHERE u.id = {$supervisorId}
-              AND " . appraiserRoleWhere('r') . "
+              AND " . appraiserRoleWhere('r', 'u') . "
               AND u.company_id = {$companyId}
               AND u.is_active = 1
             LIMIT 1
@@ -78,6 +80,15 @@ try {
     }
 
     $where = ["sa.cycle_id = {$cycleId}", "s.company_id = {$companyId}", "s.is_active = 1", appraiseeRoleWhere('sr')];
+    if ($loggedInRoleKey === 'admin') {
+        $where[] = adminAppraiseeVisibilityWhereSql(
+            $loggedInUserId,
+            $loggedInCompanyId,
+            's',
+            'sr',
+            $cycleId
+        );
+    }
     if (!$allSupervisors) $where[] = "sa.supervisor_id = {$supervisorId}";
     if ($search !== '') {
         $where[] = "(s.first_name LIKE '%{$search}%' OR s.last_name LIKE '%{$search}%' OR s.fullname LIKE '%{$search}%' OR s.email LIKE '%{$search}%' OR s.staff_id LIKE '%{$search}%' OR s.unique_ref LIKE '%{$search}%' OR s.department LIKE '%{$search}%' OR s.job_title LIKE '%{$search}%')";
@@ -128,7 +139,7 @@ try {
             TRIM(CONCAT(COALESCE(sup.first_name, ''), ' ', COALESCE(sup.last_name, ''))) AS supervisor_name,
             CASE
                 WHEN sa.supervisor_id = {$loggedInUserId}
-                 AND '{$loggedInRoleKey}' IN ('admin', 'supervisor')
+                 AND " . ($loggedInCanAppraise ? "1 = 1" : "1 = 0") . "
                  AND EXISTS (
                     SELECT 1
                     FROM supervisor_onboarding so
@@ -158,6 +169,7 @@ try {
           AND s.company_id = {$companyId}
           AND s.is_active = 1
           AND " . appraiseeRoleWhere('sr') . "
+          " . ($loggedInRoleKey === 'admin' ? " AND " . adminAppraiseeVisibilityWhereSql($loggedInUserId, $loggedInCompanyId, 's', 'sr', $cycleId) : '') . "
           " . (in_array($adminScope, ['Local', 'Expatriate'], true) ? " AND (" . roleKeySql('sr') . " <> 'staff' OR s.staff_type = '" . esc($conn, $adminScope) . "')" : '') . "
     ");
 

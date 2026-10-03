@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once __DIR__ . '/AppraisalHelpers.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 
 header('Content-Type: application/json');
 
@@ -15,6 +16,7 @@ try {
     $loggedInRole = $userData['role'] ?? '';
     $loggedInRoleKey = strtolower(str_replace(' ', '_', trim((string)$loggedInRole)));
     $loggedInCompanyId = isset($userData['company_id']) ? (int)$userData['company_id'] : 0;
+    $loggedInCanAppraise = userCanConductAppraisals($userData);
 
     $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
     if ($id <= 0) throw new Exception("Missing required parameter: 'id'.", 400);
@@ -26,7 +28,7 @@ try {
                sup.email AS supervisor_email, sup.department AS supervisor_department,
                CASE
                    WHEN ap.supervisor_id = {$loggedInUserId}
-                    AND '{$loggedInRoleKey}' IN ('admin', 'supervisor')
+                    AND " . ($loggedInCanAppraise ? "1 = 1" : "1 = 0") . "
                     AND EXISTS (
                         SELECT 1
                         FROM supervisor_assignments sa
@@ -63,23 +65,35 @@ try {
     if ($loggedInRoleKey === 'staff' && (int)$appraisal['staff_user_id'] !== $loggedInUserId) throw new Exception('Unauthorized: You can only view your own appraisal.', 403);
     if ($loggedInRoleKey === 'supervisor' && (int)$appraisal['supervisor_id'] !== $loggedInUserId && (int)$appraisal['staff_user_id'] !== $loggedInUserId) throw new Exception('Unauthorized: You can only view your own appraisal or appraisals you conducted.', 403);
     if ($loggedInRoleKey === 'admin' && (int)$appraisal['company_id'] !== $loggedInCompanyId) throw new Exception('Unauthorized: This appraisal does not belong to your company.', 403);
-    if ($loggedInRoleKey === 'admin' && (int) $appraisal['staff_user_id'] !== $loggedInUserId) {
-        $adminScope = trim((string) ($userData['staff_scope'] ?? 'All'));
-        if (in_array($adminScope, ['Local', 'Expatriate'], true)) {
-            $subject = apFetchOne($conn, "SELECT r.name AS role_name, u.staff_type FROM users u INNER JOIN roles r ON r.id = u.role_id WHERE u.id = " . (int) $appraisal['staff_user_id'] . " LIMIT 1");
-            if (
-                $subject &&
-                authRoleKey($subject['role_name'] ?? '') === 'staff' &&
-                (string) ($subject['staff_type'] ?? $appraisal['staff_type'] ?? '') !== $adminScope
-            ) {
-                throw new Exception('Unauthorized: This appraisal is outside your staff scope.', 403);
+    if ($loggedInRoleKey === 'admin') {
+        if (!adminCanViewAppraisalSubject(
+            $conn,
+            $loggedInUserId,
+            $loggedInCompanyId,
+            (int) $appraisal['staff_user_id'],
+            (int) $appraisal['supervisor_id']
+        )) {
+            throw new Exception('Unauthorized: You are not permitted to view this administrator appraisal.', 403);
+        }
+
+        if ((int) $appraisal['staff_user_id'] !== $loggedInUserId) {
+            $adminScope = trim((string) ($userData['staff_scope'] ?? 'All'));
+            if (in_array($adminScope, ['Local', 'Expatriate'], true)) {
+                $subject = apFetchOne($conn, "SELECT r.name AS role_name, u.staff_type FROM users u INNER JOIN roles r ON r.id = u.role_id WHERE u.id = " . (int) $appraisal['staff_user_id'] . " LIMIT 1");
+                if (
+                    $subject &&
+                    authRoleKey($subject['role_name'] ?? '') === 'staff' &&
+                    (string) ($subject['staff_type'] ?? $appraisal['staff_type'] ?? '') !== $adminScope
+                ) {
+                    throw new Exception('Unauthorized: This appraisal is outside your staff scope.', 403);
+                }
             }
         }
     }
 
     $scores = apFetchAll($conn, "
         SELECT sc.section_id, sc.section_code, sc.section_label, sc.section_weight,
-               sc.section_avg, sc.weighted_score, sc.rating_mode, sc.overall_rating,
+               sc.section_avg, sc.weighted_score, sc.rating_mode, sc.overall_rating, sc.question_weighting_mode,
                s.type AS section_type, s.sort_order
         FROM appraisal_section_scores sc
         LEFT JOIN appraisal_sections s ON s.id = sc.section_id
@@ -98,7 +112,7 @@ try {
 
     $kpi = apFetchAll($conn, "
         SELECT r.section_id, s.code AS section_code, s.label AS section_label, s.type AS section_type,
-               r.kpi_question_id AS question_id, r.question_text, r.rating
+               r.kpi_question_id AS question_id, r.question_text, r.question_weight, r.rating
         FROM appraisal_kpi_responses r
         LEFT JOIN appraisal_sections s ON s.id = r.section_id
         WHERE r.appraisal_id = {$id}
@@ -118,6 +132,7 @@ try {
             'section_type' => $score['section_type'] ?? 'general',
             'rating_mode' => $score['rating_mode'] ?? 'historical_summary',
             'overall_rating' => $score['overall_rating'] ?? $score['section_avg'],
+            'question_weighting_mode' => ($score['question_weighting_mode'] ?? 'equal') === 'custom' ? 'custom' : 'equal',
             'section_avg' => $score['section_avg'],
             'responses' => [],
             'is_historical_reference' => false,
@@ -135,6 +150,7 @@ try {
                 'section_type' => $row['section_type'] ?? 'general',
                 'rating_mode' => 'per_question',
                 'overall_rating' => null,
+                'question_weighting_mode' => 'equal',
                 'section_avg' => null,
                 'responses' => [],
                 'is_historical_reference' => false,
@@ -144,6 +160,7 @@ try {
         $grouped[$sid]['responses'][] = [
             'question_id' => (int)$row['question_id'],
             'question_text' => $row['question_text'],
+            'question_weight' => $row['question_weight'] ?? null,
             'rating' => $row['rating'],
             'is_reference' => false,
         ];

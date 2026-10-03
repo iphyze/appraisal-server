@@ -146,11 +146,12 @@ try {
                 u.job_title,
                 u.staff_type,
                 u.is_active,
+                u.is_supervisor,
                 r.name AS role_name
             FROM users u
             INNER JOIN roles r ON r.id = u.role_id
             WHERE u.id = {$supervisorId}
-              AND " . appraiserRoleWhere('r') . "
+              AND " . appraiserRoleWhere('r', 'u') . "
               AND u.is_active = 1
               AND u.company_id = {$scopeCompanyId}
             LIMIT 1
@@ -227,7 +228,7 @@ try {
             INNER JOIN roles sup_role ON sup_role.id = sup.role_id
             WHERE sa.cycle_id = {$cycleId}
               AND ({$supervisorId} <= 0 OR sa.supervisor_id <> {$supervisorId})
-              AND " . appraiserRoleWhere('sup_role') . "
+              AND " . appraiserRoleWhere('sup_role', 'sup') . "
             GROUP BY sa.staff_id
         ) other_assign ON other_assign.staff_id = s.id
     ";
@@ -351,7 +352,15 @@ try {
             WHERE cycle_id = {$cycleId}
             GROUP BY staff_user_id
         ) appr ON appr.staff_user_id = sa.staff_id
-        LEFT JOIN supervisor_onboarding onboard
+        LEFT JOIN (
+            SELECT
+                supervisor_id,
+                cycle_id,
+                MAX(id) AS id
+            FROM supervisor_onboarding
+            WHERE cycle_id = {$cycleId}
+            GROUP BY supervisor_id, cycle_id
+        ) onboard
             ON onboard.supervisor_id = sa.supervisor_id
            AND onboard.cycle_id = sa.cycle_id
         WHERE ({$supervisorId} <= 0 OR sa.supervisor_id = {$supervisorId})

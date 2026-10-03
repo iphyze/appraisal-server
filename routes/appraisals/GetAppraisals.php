@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once __DIR__ . '/AppraisalHelpers.php';
+require_once 'includes/AdminAppraisalVisibility.php';
 
 header('Content-Type: application/json');
 
@@ -55,6 +56,7 @@ try {
         $where[] = "ap.supervisor_id = {$loggedInUserId}";
     } elseif ($loggedInRoleKey === 'admin') {
         $where[] = "ap.company_id = {$loggedInCompanyId}";
+        $where[] = adminAppraisalVisibilityWhereSql($loggedInUserId, $loggedInCompanyId, 'ap');
         $adminScope = trim((string) ($userData['staff_scope'] ?? 'All'));
         if (!$isOwnScope && in_array($adminScope, ['Local', 'Expatriate'], true)) {
             $safeAdminScope = apEsc($conn, $adminScope);

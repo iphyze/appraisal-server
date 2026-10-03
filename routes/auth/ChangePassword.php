@@ -66,7 +66,7 @@ try {
         $logStmt->close();
     }
 
-    $fetchStmt = $conn->prepare("\n        SELECT\n            u.id, u.staff_id, u.first_name, u.last_name, u.email, u.username,\n            u.department, u.job_title, u.staff_type, u.staff_scope, u.location,\n            u.unique_ref, u.date_of_joining, u.is_active, u.last_login_at,\n            u.must_change_password, u.password_changed_at, u.updated_at, COALESCE(u.token_version, 0) AS token_version,\n            r.name AS role, c.id AS company_id, c.code AS company_code, c.name AS company_name\n        FROM users u\n        INNER JOIN roles r ON r.id = u.role_id\n        INNER JOIN companies c ON c.id = u.company_id\n        WHERE u.id = ?\n        LIMIT 1\n    ");
+    $fetchStmt = $conn->prepare("\n        SELECT\n            u.id, u.staff_id, u.first_name, u.last_name, u.email, u.username,\n            u.department, u.job_title, u.staff_type, u.staff_scope, u.is_supervisor, u.location,\n            u.unique_ref, u.date_of_joining, u.is_active, u.last_login_at,\n            u.must_change_password, u.password_changed_at, u.updated_at, COALESCE(u.token_version, 0) AS token_version,\n            r.name AS role, c.id AS company_id, c.code AS company_code, c.name AS company_name\n        FROM users u\n        INNER JOIN roles r ON r.id = u.role_id\n        INNER JOIN companies c ON c.id = u.company_id\n        WHERE u.id = ?\n        LIMIT 1\n    ");
     if (!$fetchStmt) throw new Exception('Database error: ' . $conn->error, 500);
     $fetchStmt->bind_param('i', $loggedInUserId);
     $fetchStmt->execute();
@@ -75,6 +75,7 @@ try {
 
     if ($updatedProfile) {
         $updatedProfile['must_change_password'] = (int)($updatedProfile['must_change_password'] ?? 0);
+        $updatedProfile['is_supervisor'] = (int)($updatedProfile['is_supervisor'] ?? 0);
         $updatedProfile['csrf_token'] = startSecureSession($updatedProfile);
         unset($updatedProfile['token_version']);
     }

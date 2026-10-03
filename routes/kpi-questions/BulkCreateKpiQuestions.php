@@ -11,6 +11,14 @@ function nullableInt($value) {
     return (int) $value;
 }
 
+function nullableWeight($value, $rowNumber) {
+    if ($value === null || $value === '') return null;
+    if (!is_numeric($value)) throw new Exception("Weight on row {$rowNumber} must be a number.", 400);
+    $weight = round((float) $value, 2);
+    if ($weight <= 0 || $weight > 100) throw new Exception("Weight on row {$rowNumber} must be greater than 0 and no more than 100.", 400);
+    return $weight;
+}
+
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new Exception("Bad Request: Only POST method is allowed", 400);
@@ -93,6 +101,27 @@ try {
         }
     }
 
+    if ($supervisorId && $loggedInUserRole !== 'supervisor') {
+        $appraiserWhere = appraiserRoleWhere('r', 'u');
+        $supStmt = $conn->prepare("
+            SELECT u.id
+            FROM users u
+            INNER JOIN roles r ON r.id = u.role_id
+            WHERE u.id = ?
+              AND u.company_id = ?
+              AND u.is_active = 1
+              AND {$appraiserWhere}
+            LIMIT 1
+        ");
+        if (!$supStmt) throw new Exception("Database error: " . $conn->error, 500);
+        $supStmt->bind_param("ii", $supervisorId, $companyId);
+        $supStmt->execute();
+        if ($supStmt->get_result()->num_rows === 0) {
+            throw new Exception("Selected supervisor is not an active appraisal supervisor for this company.", 404);
+        }
+        $supStmt->close();
+    }
+
     $cleanQuestions = [];
     foreach ($data['questions'] as $index => $row) {
         if (!is_array($row)) {
@@ -106,32 +135,46 @@ try {
 
         $cleanQuestions[] = [
             'question_text' => $questionText,
+            'weight_percent' => nullableWeight($row['weight_percent'] ?? null, $index + 1),
             'sort_order'   => isset($row['sort_order']) ? (int) $row['sort_order'] : $index,
         ];
+    }
+
+    $configuredWeights = array_values(array_filter(array_map(fn($row) => $row['weight_percent'], $cleanQuestions), fn($weight) => $weight !== null));
+    if (!empty($configuredWeights)) {
+        if (count($configuredWeights) !== count($cleanQuestions)) {
+            throw new Exception("When suggested KPI weighting is enabled, every question row must have a weight.", 400);
+        }
+        $configuredTotal = round(array_sum($configuredWeights), 2);
+        if (abs($configuredTotal - 100.0) > 0.01) {
+            throw new Exception("Suggested KPI question weights must total exactly 100%. Current total: {$configuredTotal}%.", 400);
+        }
     }
 
     $conn->begin_transaction();
 
     $insertStmt = $conn->prepare("
         INSERT INTO kpi_questions
-            (company_id, section_id, department, supervisor_id, staff_user_id, question_text, sort_order, is_active, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (company_id, section_id, department, supervisor_id, staff_user_id, question_text, weight_percent, sort_order, is_active, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
     if (!$insertStmt) throw new Exception("Database error: " . $conn->error, 500);
 
     $createdIds = [];
     foreach ($cleanQuestions as $row) {
         $questionText = $row['question_text'];
+        $weightPercent = $row['weight_percent'];
         $sortOrder    = $row['sort_order'];
 
         $insertStmt->bind_param(
-            "iisiisiii",
+            "iisiisdiii",
             $companyId,
             $sectionId,
             $department,
             $supervisorId,
             $staffUserId,
             $questionText,
+            $weightPercent,
             $sortOrder,
             $isActive,
             $loggedInUserId

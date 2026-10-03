@@ -48,6 +48,7 @@ try {
     // Optional fields
     $username    = isset($data['username'])    ? trim($data['username'])    : null;
     $staffScope  = isset($data['staff_scope']) ? trim($data['staff_scope']): null;
+    $isSupervisor = 0;
     $department  = isset($data['department'])  ? trim($data['department'])  : null;
     $jobTitle    = isset($data['job_title'])   ? trim($data['job_title'])   : null;
     $staffType   = isset($data['staff_type'])  ? trim($data['staff_type'])  : null;
@@ -91,8 +92,17 @@ try {
         if (!$staffScope || !in_array($staffScope, $allowedScopes)) {
             throw new Exception("Field 'staff_scope' is required for admin role. Allowed: All, Local, Expatriate", 400);
         }
+
+        if (array_key_exists('is_supervisor', $data)) {
+            $rawSupervisorCapability = $data['is_supervisor'];
+            if (!in_array($rawSupervisorCapability, [0, 1, '0', '1', false, true], true)) {
+                throw new Exception("Field 'is_supervisor' must be 0 or 1.", 400);
+            }
+            $isSupervisor = (int) ((bool) $rawSupervisorCapability);
+        }
     } else {
         $staffScope = null; // not applicable for non-admin roles
+        $isSupervisor = $roleName === 'supervisor' ? 1 : 0;
     }
 
     // Every non-super-admin account may be appraised, therefore staff type is
@@ -153,10 +163,10 @@ try {
         INSERT INTO users (
             company_id, role_id, staff_id, first_name, last_name,
             username, email, password_hash, must_change_password,
-            staff_scope, department, job_title, staff_type,
+            staff_scope, is_supervisor, department, job_title, staff_type,
             location, unique_ref, date_of_joining,
             created_by, updated_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
 
     if (!$insertStmt) {
@@ -164,7 +174,7 @@ try {
     }
 
     $insertStmt->bind_param(
-        "iissssssisssssssii",
+        "iissssssisissssssii",
         $companyId,
         $roleId,
         $staffId,
@@ -175,6 +185,7 @@ try {
         $hashedPassword,
         $mustChangePassword,
         $staffScope,
+        $isSupervisor,
         $department,
         $jobTitle,
         $staffType,
@@ -219,6 +230,7 @@ try {
             "username"       => $username,
             "role"           => $roleName,
             "staff_scope"    => $staffScope,
+            "is_supervisor"  => $isSupervisor,
             "department"     => $department,
             "job_title"      => $jobTitle,
             "staff_type"     => $staffType,
